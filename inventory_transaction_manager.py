@@ -952,20 +952,49 @@ class InventoryApp(ctk.CTk):
     self._sync_type_fields()
 
   def _build_overview_tab(self) -> None:
-    self.tab_ov.grid_rowconfigure(0, weight=1)
+    # Layout: top controls + table frame
+    self.tab_ov.grid_rowconfigure(1, weight=1)
     self.tab_ov.grid_columnconfigure(0, weight=1)
 
+    # ---------------------------------------------------------
+    # Controls
+    # ---------------------------------------------------------
+
+    controls = ctk.CTkFrame(self.tab_ov)
+    controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+    controls.grid_columnconfigure(5, weight=1)
+
+    ctk.CTkLabel(controls, text="View").grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
+
+    self.ov_view_var = tk.StringVar(value="Inventory")
+    self.opt_ov_view = ctk.CTkOptionMenu(
+      controls,
+      values=["Inventory", "Monthly"],
+      variable=self.ov_view_var,
+      width=160,
+      command=lambda _v: self._on_overview_view_changed(),
+    )
+    self.opt_ov_view.grid(row=0, column=1, padx=6, pady=10, sticky="w")
+
+    self.btn_ov_export = ctk.CTkButton(controls, text="Export CSV", command=self._export_overview_csv)
+    self.btn_ov_export.grid(row=0, column=2, padx=6, pady=10, sticky="w")
+
+    # ---------------------------------------------------------
+    # Table
+    # ---------------------------------------------------------
+
     frame = ctk.CTkFrame(self.tab_ov)
-    frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+    frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
     frame.grid_rowconfigure(0, weight=1)
     frame.grid_columnconfigure(0, weight=1)
     frame.grid_rowconfigure(1, weight=0)
 
-    columns = ["sku", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+    # Keep refs for resize-fit logic
+    self._ov_frame = frame
 
     self.ov_tree = ttk.Treeview(
       frame,
-      columns=columns,
+      columns=[],
       show="headings",
       height=18,
       selectmode="extended",
@@ -990,6 +1019,8 @@ class InventoryApp(ctk.CTk):
     vsb.grid(row=0, column=1, sticky="ns")
     hsb.grid(row=1, column=0, sticky="ew")
 
+    self._ov_vsb = vsb
+
     # Zebra + status tint tags (same naming as gitea_repository_backup)
     self.ov_tree.tag_configure(
       "odd",
@@ -1005,71 +1036,15 @@ class InventoryApp(ctk.CTk):
     self.ov_tree.tag_configure("status_error_even", background="#3d1f1f")  # dark red (even)
     self.ov_tree.tag_configure("status_error_odd",  background="#462424")  # dark red (odd)
 
-    headings = {
-      "sku": "SKU",
-      "onhand_qty": "OnHand Qty",
-      "avg_cost": "Avg Cost",
-      "onhand_cost": "OnHand Cost",
-      "last_tx_date": "Last Tx Date",
-      "last_sale_price": "Last Sale Price",
-      "status": "Status",
-    }
-    widths = {
-      "sku": 240,
-      "onhand_qty": 120,
-      "avg_cost": 120,
-      "onhand_cost": 170,
-      "last_tx_date": 150,
-
-      "last_sale_price": 150,
-      "status": 220,
-    }
-
-    col_anchor = {
-      "sku": "w",
-      "onhand_qty": "e",
-      "avg_cost": "e",
-      "onhand_cost": "e",
-      "last_tx_date": "w",
-      "last_sale_price": "e",
-      "status": "center",
-    }
-
-    head_anchor = {
-      k: ("center" if v == "center" else ("e" if v == "e" else "w"))
-      for k, v in col_anchor.items()
-    }
-
-    heading_gutter = "  "  # visual separation between adjacent headers
-
-    for ci, c in enumerate(columns):
-      base_text = headings.get(c, c)
-      head_text = (f"{base_text}{heading_gutter}" if ci < (len(columns) - 1) else base_text)
-
-      self.ov_tree.heading(
-        c,
-        text=head_text,
-        anchor=head_anchor.get(c, "w"),
-      )
-      self.ov_tree.column(
-        c,
-        width=widths.get(c, 120),
-        minwidth=32,
-        anchor=col_anchor.get(c, "w"),
-        stretch=False,
-      )
-
     # ---------------------------------------------------------
-    # Auto-fit columns to viewport:
-    # - Fixed: qty + money columns stay fixed
-    # - Stretch: sku + status share remaining space
+    # Auto-fit columns to viewport (robust across view modes)
     # ---------------------------------------------------------
 
-    _fit_after_id = {"id": None}
+    self._ov_fit_after_id = {"id": None}
 
     def _fit_columns_now() -> None:
       try:
-        frame_w = int(frame.winfo_width() or 0)
+        frame_w = int(self._ov_frame.winfo_width() or 0)
       except Exception:
         frame_w = 0
 
@@ -1078,14 +1053,24 @@ class InventoryApp(ctk.CTk):
         return
 
       try:
-        sb_w = int(vsb.winfo_width() or vsb.winfo_reqwidth() or 16)
+        sb_w = int(self._ov_vsb.winfo_width() or self._ov_vsb.winfo_reqwidth() or 16)
       except Exception:
         sb_w = 16
 
       avail = max(frame_w - sb_w - 6, 64)
 
-      stretch_cols = ("sku", "status")
-      fixed_cols = tuple(c for c in columns if c not in stretch_cols)
+      cols = list(self.ov_tree["columns"] or [])
+      if not cols:
+        return
+
+      mode = (self.ov_view_var.get() or "Inventory").strip()
+
+      if mode == "Monthly":
+        stretch_cols = [c for c in ["month"] if c in cols]
+      else:
+        stretch_cols = [c for c in ["sku", "status"] if c in cols]
+
+      fixed_cols = [c for c in cols if c not in stretch_cols]
 
       fixed_w = 0
       for c in fixed_cols:
@@ -1094,38 +1079,42 @@ class InventoryApp(ctk.CTk):
         except Exception:
           pass
 
+      if not stretch_cols:
+        return
+
       if fixed_w >= (avail - 64):
         return
 
       stretch_avail = max(avail - fixed_w, 64)
 
-      try:
-        w_sku = int(self.ov_tree.column("sku", "width") or 1)
-      except Exception:
-        w_sku = widths.get("sku", 240)
-      try:
-        w_status = int(self.ov_tree.column("status", "width") or 1)
-      except Exception:
-        w_status = widths.get("status", 220)
-
-      total = max(w_sku + w_status, 1)
-      min_w = 32
-
-      new_sku = max(min_w, int(stretch_avail * (w_sku / total)))
-      new_status = max(min_w, int(stretch_avail - new_sku))
-
-      self.ov_tree.column("sku", width=new_sku)
-      self.ov_tree.column("status", width=new_status)
-
-    def _fit_columns_debounced(_event=None) -> None:
-      if _fit_after_id["id"] is not None:
+      # Split evenly across stretch columns (simple + predictable)
+      per = max(int(stretch_avail / max(len(stretch_cols), 1)), 32)
+      for c in stretch_cols[:-1]:
         try:
-          self.after_cancel(_fit_after_id["id"])
+          self.ov_tree.column(c, width=per)
         except Exception:
           pass
-      _fit_after_id["id"] = self.after(30, _fit_columns_now)
+
+      # Last gets remainder to avoid rounding drift
+      try:
+        used = 0
+        for c in stretch_cols[:-1]:
+          used += int(self.ov_tree.column(c, "width") or per)
+        last_w = max(int(stretch_avail - used), 32)
+        self.ov_tree.column(stretch_cols[-1], width=last_w)
+      except Exception:
+        pass
+
+    def _fit_columns_debounced(_event=None) -> None:
+      if self._ov_fit_after_id["id"] is not None:
+        try:
+          self.after_cancel(self._ov_fit_after_id["id"])
+        except Exception:
+          pass
+      self._ov_fit_after_id["id"] = self.after(30, _fit_columns_now)
 
     frame.bind("<Configure>", _fit_columns_debounced)
+    self._ov_fit_columns_now = _fit_columns_now
 
     # ---------------------------------------------------------
     # Treeview hover tooltip: show ONLY hovered cell value (literal)
@@ -1250,6 +1239,9 @@ class InventoryApp(ctk.CTk):
 
     self._ov_tree_tip_hide = _tree_tip_hide
 
+    # Configure initial view columns
+    self._configure_overview_tree_for_view()
+
   # -----------------------------------------------------------------------------
   # Project bar callbacks
   # -----------------------------------------------------------------------------
@@ -1306,6 +1298,23 @@ class InventoryApp(ctk.CTk):
         pass
 
     for b in [self.btn_add, self.btn_update, self.btn_delete, self.btn_export]:
+      try:
+        b.configure(state=state_btn)
+      except Exception:
+        pass
+
+    # Overview tab controls (optional until UI built)
+    for w in [getattr(self, "opt_ov_view", None)]:
+      if w is None:
+        continue
+      try:
+        w.configure(state=state_btn)
+      except Exception:
+        pass
+
+    for b in [getattr(self, "btn_ov_export", None)]:
+      if b is None:
+        continue
       try:
         b.configure(state=state_btn)
       except Exception:
@@ -1468,7 +1477,7 @@ class InventoryApp(ctk.CTk):
   def _refresh_all(self) -> None:
     rows, overview = self.engine.compute(self.transactions)
     self._refresh_tx_table(rows)
-    self._refresh_overview_table(overview)
+    self._refresh_overview_table(overview, rows)
 
   def _refresh_tx_table(self, rows: List[Dict[str, Any]]) -> None:
     # If a hover-tooltip is currently visible, kill it before rebuilding rows.
@@ -1513,7 +1522,152 @@ class InventoryApp(ctk.CTk):
 
       self.tx_tree.insert("", "end", iid=str(r["id"]), values=values, tags=(tag,))
 
-  def _refresh_overview_table(self, overview: Dict[str, Dict[str, Any]]) -> None:
+  # ---------------------------------------------------------------------------
+  # Overview view (Inventory vs Monthly)
+  # ---------------------------------------------------------------------------
+
+  def _on_overview_view_changed(self) -> None:
+    self._configure_overview_tree_for_view()
+    self._refresh_all()
+
+  def _configure_overview_tree_for_view(self) -> None:
+    mode = (self.ov_view_var.get() or "Inventory").strip()
+
+    if mode == "Monthly":
+      columns = ["month", "month_date", "purchase_cost", "sales_amount", "cogs"]
+      headings = {
+        "month": "Month",
+        "month_date": "Month Date",
+        "purchase_cost": "Purchase Cost",
+        "sales_amount": "Sales Amount",
+        "cogs": "COGS",
+      }
+      widths = {
+        "month": 140,
+        "month_date": 140,
+        "purchase_cost": 170,
+        "sales_amount": 170,
+        "cogs": 150,
+      }
+      col_anchor = {
+        "month": "w",
+        "month_date": "w",
+        "purchase_cost": "e",
+        "sales_amount": "e",
+        "cogs": "e",
+      }
+    else:
+      columns = ["sku", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+      headings = {
+        "sku": "SKU",
+        "onhand_qty": "OnHand Qty",
+        "avg_cost": "Avg Cost",
+        "onhand_cost": "OnHand Cost",
+        "last_tx_date": "Last Tx Date",
+        "last_sale_price": "Last Sale Price",
+        "status": "Status",
+      }
+      widths = {
+        "sku": 240,
+        "onhand_qty": 120,
+        "avg_cost": 120,
+        "onhand_cost": 170,
+        "last_tx_date": 150,
+        "last_sale_price": 150,
+        "status": 220,
+      }
+      col_anchor = {
+        "sku": "w",
+        "onhand_qty": "e",
+        "avg_cost": "e",
+        "onhand_cost": "e",
+        "last_tx_date": "w",
+        "last_sale_price": "e",
+        "status": "center",
+      }
+
+    # Apply column set
+    self.ov_tree["columns"] = columns
+
+    head_anchor = {
+      k: ("center" if v == "center" else ("e" if v == "e" else "w"))
+      for k, v in col_anchor.items()
+    }
+
+    heading_gutter = "  "  # visual separation between adjacent headers
+
+    for ci, c in enumerate(columns):
+      base_text = headings.get(c, c)
+      head_text = (f"{base_text}{heading_gutter}" if ci < (len(columns) - 1) else base_text)
+
+      self.ov_tree.heading(
+        c,
+        text=head_text,
+        anchor=head_anchor.get(c, "w"),
+      )
+      self.ov_tree.column(
+        c,
+        width=widths.get(c, 120),
+        minwidth=32,
+        anchor=col_anchor.get(c, "w"),
+        stretch=False,
+      )
+
+    # Fit after reconfig
+    try:
+      if hasattr(self, "_ov_fit_columns_now") and callable(self._ov_fit_columns_now):
+        self.after(1, self._ov_fit_columns_now)
+    except Exception:
+      pass
+
+  def _compute_monthly_report_rows(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Build month aggregate rows from computed per-transaction rows.
+
+    Columns:
+      - month: YYYY-MM
+      - month_date: YYYY-MM-01
+      - purchase_cost: sum(purchase_total_cost) for PURCHASE rows
+      - sales_amount: sum(sales_rev) for SALE rows
+      - cogs: sum(cogs) for SALE rows
+    """
+    bucket: Dict[str, Dict[str, float]] = {}
+
+    for r in (rows or []):
+      d = str(r.get("date") or "")
+      if len(d) < 7:
+        continue
+      month = d[:7]
+
+      if month not in bucket:
+        bucket[month] = {"purchase_cost": 0.0, "sales_amount": 0.0, "cogs": 0.0}
+
+      if r.get("type") == TX_PURCHASE:
+        bucket[month]["purchase_cost"] += float(r.get("purchase_total_cost") or 0.0)
+      elif r.get("type") == TX_SALE:
+        bucket[month]["sales_amount"] += float(r.get("sales_rev") or 0.0)
+        bucket[month]["cogs"] += float(r.get("cogs") or 0.0)
+
+    out: List[Dict[str, Any]] = []
+    for month in sorted(bucket.keys()):
+      out.append({
+        "month": month,
+        "month_date": f"{month}-01",
+        "purchase_cost": float(bucket[month]["purchase_cost"]),
+        "sales_amount": float(bucket[month]["sales_amount"]),
+        "cogs": float(bucket[month]["cogs"]),
+      })
+    return out
+
+  def _refresh_overview_table(self, overview: Dict[str, Dict[str, Any]], rows: List[Dict[str, Any]]) -> None:
+    mode = (self.ov_view_var.get() or "Inventory").strip()
+    if mode == "Monthly":
+      month_rows = self._compute_monthly_report_rows(rows)
+      self._refresh_overview_table_monthly(month_rows)
+    else:
+      self._refresh_overview_table_inventory(overview)
+
+  def _refresh_overview_table_inventory(self, overview: Dict[str, Dict[str, Any]]) -> None:
     try:
       if hasattr(self, "_ov_tree_tip_hide") and callable(self._ov_tree_tip_hide):
         self._ov_tree_tip_hide()
@@ -1547,6 +1701,88 @@ class InventoryApp(ctk.CTk):
         tag = "status_done_even" if is_even else "status_done_odd"
 
       self.ov_tree.insert("", "end", iid=sku, values=values, tags=(tag,))
+
+  def _refresh_overview_table_monthly(self, month_rows: List[Dict[str, Any]]) -> None:
+    try:
+      if hasattr(self, "_ov_tree_tip_hide") and callable(self._ov_tree_tip_hide):
+        self._ov_tree_tip_hide()
+    except Exception:
+      pass
+
+    self.ov_tree.delete(*self.ov_tree.get_children())
+
+    for i, r in enumerate(month_rows or []):
+      pad_l = "  "  # 2 spaces
+
+      values = (
+        f"{pad_l}{r['month']}",
+        f"{pad_l}{r['month_date']}",
+        money(float(r.get("purchase_cost") or 0.0)),
+        money(float(r.get("sales_amount") or 0.0)),
+        money(float(r.get("cogs") or 0.0)),
+      )
+
+      is_even = (i % 2) == 0
+      tag = "even" if is_even else "odd"
+      self.ov_tree.insert("", "end", iid=str(r["month"]), values=values, tags=(tag,))
+
+  def _export_overview_csv(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+
+    mode = (self.ov_view_var.get() or "Inventory").strip()
+    initialfile = "overview_monthly.csv" if mode == "Monthly" else "overview_inventory.csv"
+
+    path = filedialog.asksaveasfilename(
+      title="Export CSV",
+      defaultextension=".csv",
+      filetypes=[("CSV", "*.csv")],
+      initialfile=initialfile,
+      initialdir=self.project_dir or None,
+    )
+    if not path:
+      return
+
+    rows, overview = self.engine.compute(self.transactions)
+
+    if mode == "Monthly":
+      data_rows = self._compute_monthly_report_rows(rows)
+      headers = ["month", "month_date", "purchase_cost", "sales_amount", "cogs"]
+    else:
+      data_rows = []
+      for sku in sorted(overview.keys()):
+        s = overview[sku]
+        data_rows.append({
+          "sku": s["sku"],
+          "onhand_qty": s["onhand_qty"],
+          "avg_cost": float(s["avg_cost"]),
+          "onhand_cost": float(s["onhand_cost"]),
+          "last_tx_date": s["last_tx_date"],
+          "last_sale_price": float(s["last_sale_price"]),
+          "status": s["status"],
+        })
+      headers = ["sku", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+
+    try:
+      with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(",".join(headers) + "\n")
+        for r in data_rows:
+          line = []
+          for h in headers:
+            v = r.get(h, "")
+            if isinstance(v, str):
+              if "," in v or '"' in v:
+                v = '"' + v.replace('"', '""') + '"'
+              line.append(v)
+            else:
+              line.append(str(v))
+          f.write(",".join(line) + "\n")
+      Log.ok(self.LOG_TAG, "Exported overview CSV.", {"path": path, "mode": mode})
+      messagebox.showinfo("Export", f"Exported to:\n{path}")
+    except Exception as e:
+      Log.error(self.LOG_TAG, "Overview CSV export failed.", {"error": str(e)})
+      messagebox.showerror("Export Failed", str(e))
 
   # -----------------------------------------------------------------------------
   # Selection Helpers
