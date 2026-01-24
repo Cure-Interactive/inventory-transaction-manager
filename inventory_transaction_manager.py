@@ -618,12 +618,19 @@ class InventoryApp(ctk.CTk):
     self._build_overview_tab()
 
   def _build_transactions_tab(self) -> None:
-    self.tab_tx.grid_rowconfigure(1, weight=1)
+    # Row 0: inputs. Row 1: note + action buttons. Row 2: table.
+    self.tab_tx.grid_rowconfigure(0, weight=0)
+    self.tab_tx.grid_rowconfigure(1, weight=0)
+    self.tab_tx.grid_rowconfigure(2, weight=1)
     self.tab_tx.grid_columnconfigure(0, weight=1)
 
-    controls = ctk.CTkFrame(self.tab_tx)
-    controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-    controls.grid_columnconfigure(12, weight=1)
+    # Split into two independent grids so the dynamic unit label never reflows the buttons.
+    form_row = ctk.CTkFrame(self.tab_tx)
+    form_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+
+    action_row = ctk.CTkFrame(self.tab_tx)
+    action_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+    action_row.grid_columnconfigure(1, weight=1)
 
     self.var_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
     self.var_sku = tk.StringVar(value="")
@@ -631,19 +638,24 @@ class InventoryApp(ctk.CTk):
     self.var_qty = tk.StringVar(value="1")
     self.var_purchase_unit = tk.StringVar(value="1.00")
     self.var_sale_unit = tk.StringVar(value="3.00")
+
+    # Single "unit" field that swaps meaning based on Type.
+    self.var_unit_price = tk.StringVar(value=self.var_purchase_unit.get())
+    self._last_type_for_unit = self.var_type.get()
+
     self.var_note = tk.StringVar(value="")
 
-    ctk.CTkLabel(controls, text="Date").grid(row=0, column=0, padx=(10, 6), pady=10)
-    self.entry_date = ctk.CTkEntry(controls, textvariable=self.var_date, width=120)
+    ctk.CTkLabel(form_row, text="Date").grid(row=0, column=0, padx=(10, 6), pady=10)
+    self.entry_date = ctk.CTkEntry(form_row, textvariable=self.var_date, width=120)
     self.entry_date.grid(row=0, column=1, padx=6, pady=10)
 
-    ctk.CTkLabel(controls, text="SKU").grid(row=0, column=2, padx=(14, 6), pady=10)
-    self.entry_sku = ctk.CTkEntry(controls, textvariable=self.var_sku, width=220)
+    ctk.CTkLabel(form_row, text="SKU").grid(row=0, column=2, padx=(14, 6), pady=10)
+    self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=220)
     self.entry_sku.grid(row=0, column=3, padx=6, pady=10)
 
-    ctk.CTkLabel(controls, text="Type").grid(row=0, column=4, padx=(14, 6), pady=10)
+    ctk.CTkLabel(form_row, text="Type").grid(row=0, column=4, padx=(14, 6), pady=10)
     self.opt_type = ctk.CTkOptionMenu(
-      controls,
+      form_row,
       values=[TX_PURCHASE, TX_SALE],
       variable=self.var_type,
       width=140,
@@ -651,39 +663,40 @@ class InventoryApp(ctk.CTk):
     )
     self.opt_type.grid(row=0, column=5, padx=6, pady=10)
 
-    ctk.CTkLabel(controls, text="Qty").grid(row=0, column=6, padx=(14, 6), pady=10)
-    self.entry_qty = ctk.CTkEntry(controls, textvariable=self.var_qty, width=80)
+    ctk.CTkLabel(form_row, text="Qty").grid(row=0, column=6, padx=(14, 6), pady=10)
+    self.entry_qty = ctk.CTkEntry(form_row, textvariable=self.var_qty, width=80)
     self.entry_qty.grid(row=0, column=7, padx=6, pady=10)
 
-    ctk.CTkLabel(controls, text="Purchase Unit Cost").grid(row=0, column=8, padx=(14, 6), pady=10)
-    self.entry_purchase_unit = ctk.CTkEntry(controls, textvariable=self.var_purchase_unit, width=120)
-    self.entry_purchase_unit.grid(row=0, column=9, padx=6, pady=10)
+    self.lbl_unit_price = ctk.CTkLabel(form_row, text="Purchase Unit Cost")
+    self.lbl_unit_price.grid(row=0, column=8, padx=(14, 6), pady=10)
 
-    ctk.CTkLabel(controls, text="Sale Unit Price").grid(row=0, column=10, padx=(14, 6), pady=10)
-    self.entry_sale_unit = ctk.CTkEntry(controls, textvariable=self.var_sale_unit, width=120)
-    self.entry_sale_unit.grid(row=0, column=11, padx=6, pady=10)
+    self.entry_unit_price = ctk.CTkEntry(form_row, textvariable=self.var_unit_price, width=120)
+    self.entry_unit_price.grid(row=0, column=9, padx=6, pady=10)
 
-    ctk.CTkLabel(controls, text="Note").grid(row=1, column=0, padx=(10, 6), pady=(0, 10))
-    self.entry_note = ctk.CTkEntry(controls, textvariable=self.var_note, width=720)
-    self.entry_note.grid(row=1, column=1, columnspan=8, sticky="w", padx=6, pady=(0, 10))
+    ctk.CTkLabel(action_row, text="Note").grid(row=0, column=0, padx=(10, 6), pady=(0, 10))
+    self.entry_note = ctk.CTkEntry(action_row, textvariable=self.var_note)
+    self.entry_note.grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 10))
 
-    self.btn_add = ctk.CTkButton(controls, text="Add", command=self._on_add)
-    self.btn_add.grid(row=1, column=9, padx=6, pady=(0, 10), sticky="ew")
+    buttons_frame = ctk.CTkFrame(action_row, fg_color="transparent")
+    buttons_frame.grid(row=0, column=2, padx=(6, 10), pady=(0, 10), sticky="e")
 
-    self.btn_update = ctk.CTkButton(controls, text="Update Selected", command=self._on_update_selected)
-    self.btn_update.grid(row=1, column=10, padx=6, pady=(0, 10), sticky="ew")
+    self.btn_add = ctk.CTkButton(buttons_frame, text="Add", command=self._on_add)
+    self.btn_add.grid(row=0, column=0, padx=6, sticky="ew")
+
+    self.btn_update = ctk.CTkButton(buttons_frame, text="Update Selected", command=self._on_update_selected)
+    self.btn_update.grid(row=0, column=1, padx=6, sticky="ew")
 
     self.btn_delete = ctk.CTkButton(
-      controls,
+      buttons_frame,
       text="Delete Selected",
       fg_color="#8B2D2D",
       hover_color="#A53636",
       command=self._on_delete_selected,
     )
-    self.btn_delete.grid(row=1, column=11, padx=6, pady=(0, 10), sticky="ew")
+    self.btn_delete.grid(row=0, column=2, padx=6, sticky="ew")
 
-    self.btn_export = ctk.CTkButton(controls, text="Export CSV", command=self._export_csv)
-    self.btn_export.grid(row=1, column=12, padx=6, pady=(0, 10), sticky="e")
+    self.btn_export = ctk.CTkButton(buttons_frame, text="Export CSV", command=self._export_csv)
+    self.btn_export.grid(row=0, column=3, padx=6, sticky="ew")
 
     # ---------------------------------------------------------
     # Transactions Table (ttk.Treeview) — gitea-like behavior
@@ -693,7 +706,8 @@ class InventoryApp(ctk.CTk):
     # ---------------------------------------------------------
 
     table_frame = ctk.CTkFrame(self.tab_tx)
-    table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
+    table_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(6, 10))
+
     table_frame.grid_rowconfigure(0, weight=1)
     table_frame.grid_columnconfigure(0, weight=1)
     table_frame.grid_rowconfigure(1, weight=0)
@@ -1003,7 +1017,8 @@ class InventoryApp(ctk.CTk):
 
     controls = ctk.CTkFrame(self.tab_ov)
     controls.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-    controls.grid_columnconfigure(5, weight=1)
+    # Column 2 holds the Export button; let it stretch so the button can sit on the far right.
+    controls.grid_columnconfigure(2, weight=1)
 
     ctk.CTkLabel(controls, text="View").grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
 
@@ -1018,7 +1033,7 @@ class InventoryApp(ctk.CTk):
     self.opt_ov_view.grid(row=0, column=1, padx=6, pady=10, sticky="w")
 
     self.btn_ov_export = ctk.CTkButton(controls, text="Export CSV", command=self._export_overview_csv)
-    self.btn_ov_export.grid(row=0, column=2, padx=6, pady=10, sticky="w")
+    self.btn_ov_export.grid(row=0, column=2, padx=(6, 10), pady=10, sticky="e")
 
     # ---------------------------------------------------------
     # Table
@@ -1107,7 +1122,8 @@ class InventoryApp(ctk.CTk):
       mode = (self.ov_view_var.get() or "Inventory").strip()
 
       if mode == "Monthly":
-        stretch_cols = [c for c in ["month"] if c in cols]
+        # Even-split ALL monthly columns across the viewport.
+        stretch_cols = list(cols)
       else:
         stretch_cols = [c for c in ["sku", "status"] if c in cols]
 
@@ -1326,7 +1342,8 @@ class InventoryApp(ctk.CTk):
     state_entry = "normal" if enabled else "disabled"
     state_btn = "normal" if enabled else "disabled"
 
-    for w in [self.entry_date, self.entry_sku, self.entry_qty, self.entry_purchase_unit, self.entry_sale_unit, self.entry_note]:
+    for w in [self.entry_date, self.entry_sku, self.entry_qty, self.entry_unit_price, self.entry_note]:
+
       try:
         w.configure(state=state_entry)
       except Exception:
@@ -1367,12 +1384,28 @@ class InventoryApp(ctk.CTk):
 
   def _sync_type_fields(self) -> None:
     t = self.var_type.get()
+
+    # Persist what the user typed into the appropriate backing var before swapping.
+    cur = (self.var_unit_price.get() or "").strip()
+    prev = getattr(self, "_last_type_for_unit", None)
+
+    if prev == TX_PURCHASE:
+      self.var_purchase_unit.set(cur or self.var_purchase_unit.get())
+    elif prev == TX_SALE:
+      self.var_sale_unit.set(cur or self.var_sale_unit.get())
+
+    # Swap label + displayed value.
     if t == TX_PURCHASE:
-      self.entry_purchase_unit.configure(state="normal" if self.project_data_path else "disabled")
-      self.entry_sale_unit.configure(state="disabled")
+      self.lbl_unit_price.configure(text="Purchase Unit Cost")
+      self.var_unit_price.set(self.var_purchase_unit.get())
     else:
-      self.entry_purchase_unit.configure(state="disabled")
-      self.entry_sale_unit.configure(state="normal" if self.project_data_path else "disabled")
+      self.lbl_unit_price.configure(text="Sale Unit Price")
+      self.var_unit_price.set(self.var_sale_unit.get())
+
+    self._last_type_for_unit = t
+
+    # Disable field if no project loaded (matches prior behavior).
+    self.entry_unit_price.configure(state=("normal" if self.project_data_path else "disabled"))
 
   def _on_add(self) -> None:
     if not self.project_data_path:
@@ -1447,6 +1480,14 @@ class InventoryApp(ctk.CTk):
     self.var_qty.set(str(tx.qty))
     self.var_purchase_unit.set(f"{tx.purchase_unit_cost:.2f}")
     self.var_sale_unit.set(f"{tx.sale_unit_price:.2f}")
+
+    if tx.type == TX_PURCHASE:
+      self.var_unit_price.set(self.var_purchase_unit.get())
+      self._last_type_for_unit = TX_PURCHASE
+    else:
+      self.var_unit_price.set(self.var_sale_unit.get())
+      self._last_type_for_unit = TX_SALE
+
     self.var_note.set(tx.note or "")
     self._sync_type_fields()
 
@@ -1472,14 +1513,14 @@ class InventoryApp(ctk.CTk):
 
     if ttype == TX_PURCHASE:
       try:
-        purchase_unit = float(self.var_purchase_unit.get())
+        purchase_unit = float(self.var_unit_price.get())
       except:
         raise ValueError("Purchase Unit Cost must be a number")
       if purchase_unit < 0:
         raise ValueError("Purchase Unit Cost must be >= 0")
     else:
       try:
-        sale_unit = float(self.var_sale_unit.get())
+        sale_unit = float(self.var_unit_price.get())
       except:
         raise ValueError("Sale Unit Price must be a number")
       if sale_unit < 0:
@@ -1530,7 +1571,14 @@ class InventoryApp(ctk.CTk):
 
     self.tx_tree.delete(*self.tx_tree.get_children())
 
-    for i, r in enumerate(rows):
+    # Most recent first (date DESC). Tie-breaker: higher ID first.
+    rows_sorted = sorted(
+      rows,
+      key=lambda r: (str(r.get("date", "")), int(r.get("id", 0) or 0)),
+      reverse=True,
+    )
+
+    for i, r in enumerate(rows_sorted):
       # Fake "cell padding" for left-aligned text fields (Treeview has no per-cell padding on Windows ttk)
       pad_l = "  "  # 2 spaces
 
@@ -1651,7 +1699,7 @@ class InventoryApp(ctk.CTk):
         width=widths.get(c, 120),
         minwidth=32,
         anchor=col_anchor.get(c, "w"),
-        stretch=False,
+        stretch=(mode == "Monthly"),
       )
 
     # Fit after reconfig
@@ -1690,7 +1738,7 @@ class InventoryApp(ctk.CTk):
         bucket[month]["cogs"] += float(r.get("cogs") or 0.0)
 
     out: List[Dict[str, Any]] = []
-    for month in sorted(bucket.keys()):
+    for month in sorted(bucket.keys(), reverse=True):
       out.append({
         "month": month,
         "month_date": f"{month}-01",
