@@ -734,14 +734,14 @@ class InventoryApp(ctk.CTk):
     self.entry_sku.grid(row=0, column=3, padx=6, pady=10)
 
     ctk.CTkLabel(form_row, text="Alias").grid(row=0, column=4, padx=(14, 6), pady=10)
-    self.alias_combo = ctk.CTkComboBox(
+    self.alias_combo = ctk.CTkOptionMenu(
       form_row,
       variable=self.var_alias_choice,
-      values=[],
-      state="normal",
+      values=[""],  # CTkOptionMenu needs at least 1 value
       width=260,
       command=lambda _choice: self._on_alias_selected_in_tx_form(),
     )
+
     self.alias_combo.grid(row=0, column=5, padx=6, pady=10)
 
     ctk.CTkLabel(form_row, text="Type").grid(row=0, column=6, padx=(14, 6), pady=10)
@@ -1535,12 +1535,12 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
-    # Alias dropdown
+    # Alias dropdown (hard dropdown: no typing)
     for w in [getattr(self, "alias_combo", None)]:
       if w is None:
         continue
       try:
-        w.configure(state=state_entry)
+        w.configure(state=("readonly" if enabled else "disabled"))
       except Exception:
         pass
 
