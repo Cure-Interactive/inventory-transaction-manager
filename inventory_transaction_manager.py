@@ -34,6 +34,41 @@ from tkinter import ttk, messagebox, filedialog
 
 
 # =============================================================================
+# Window Icon (title bar / taskbar best-effort)
+# =============================================================================
+
+def set_window_icon(root, ico_path: str, png_path: str) -> None:
+  """
+  Set a title-bar icon with best-effort cross-platform behavior.
+
+  Windows:
+    - iconbitmap(.ico) works for title bar + taskbar in most cases.
+  Linux/macOS:
+    - iconphoto(.png) is the common path.
+
+  Notes:
+  - We try both; failures are ignored (best effort).
+  - Paths should be absolute for reliability.
+  """
+  ico_abs = os.path.abspath(ico_path) if ico_path else ""
+  png_abs = os.path.abspath(png_path) if png_path else ""
+
+  try:
+    if ico_abs and os.path.isfile(ico_abs):
+      root.iconbitmap(ico_abs)
+  except Exception:
+    pass
+
+  try:
+    if png_abs and os.path.isfile(png_abs):
+      img = tk.PhotoImage(file=png_abs)
+      root.iconphoto(True, img)
+      root._iconphoto_ref = img  # type: ignore[attr-defined]
+  except Exception:
+    pass
+
+
+# =============================================================================
 # TTK Theme Parity (Treeview + Scrollbar) — dark mode matching CustomTkinter
 # =============================================================================
 
@@ -158,6 +193,9 @@ TX_PURCHASE = "PURCHASE"
 TX_SALE = "SALE"
 
 SCRIPT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+APP_ICON_ICO_PATH = os.path.join(SCRIPT_ROOT_DIR, "icon.ico")
+APP_ICON_PNG_PATH = os.path.join(SCRIPT_ROOT_DIR, "icon.png")
 
 APP_CONFIG_FILENAME = "config.json"
 APP_CONFIG_PATH = os.path.join(SCRIPT_ROOT_DIR, APP_CONFIG_FILENAME)
@@ -402,8 +440,11 @@ class InventoryApp(ctk.CTk):
   def __init__(self) -> None:
     super().__init__()
 
+    set_window_icon(self, APP_ICON_ICO_PATH, APP_ICON_PNG_PATH)
+
     self.LOG_TAG = "[🧮 Inventory]"
-    self.title("Inventory (Weighted Avg Cost) - CustomTkinter")
+    self.title("Inventory Transaction Manager (Weighted Avg Cost)")
+
     self.geometry("1480x820")
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("dark-blue")
