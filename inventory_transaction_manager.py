@@ -1558,6 +1558,7 @@ class InventoryApp(ctk.CTk):
 
     # Overview tab controls
     for w in [getattr(self, "opt_ov_view", None)]:
+
       if w is None:
         continue
       try:
@@ -1709,6 +1710,24 @@ class InventoryApp(ctk.CTk):
       tag = "even" if (i % 2) == 0 else "odd"
       self.alias_tree.insert("", "end", iid=sku, values=values, tags=(tag,))
 
+  def _get_selected_alias_skus(self) -> List[str]:
+    """
+    Get all selected alias SKUs (extended selection).
+    Returns a sorted list of unique SKUs.
+    """
+    if not hasattr(self, "alias_tree"):
+      return []
+    sel = self.alias_tree.selection()
+    if not sel:
+      return []
+    out = []
+    for iid in sel:
+      s = str(iid or "").strip()
+      if s:
+        out.append(s)
+    out = sorted(set(out), key=lambda x: x.lower())
+    return out
+
   def _get_selected_alias_sku(self) -> Optional[str]:
     if not hasattr(self, "alias_tree"):
       return None
@@ -1806,18 +1825,28 @@ class InventoryApp(ctk.CTk):
     if not self.project_data_path:
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
-    sku = self._get_selected_alias_sku()
-    if not sku:
-      messagebox.showinfo("Delete", "Select an alias row first.")
-      return
-    if not messagebox.askyesno("Delete Alias", f"Delete alias for SKU:\n\n{sku}"):
+
+    skus = self._get_selected_alias_skus()
+    if not skus:
+      messagebox.showinfo("Delete", "Select one or more alias rows first.")
       return
 
-    self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sku]
+    preview = ", ".join(skus[:10])
+    if len(skus) > 10:
+      preview += f", … (+{len(skus) - 10} more)"
+
+    if not messagebox.askyesno("Delete Alias", f"Delete {len(skus)} selected alias(es)?\n\nSKUs: {preview}"):
+      return
+
+    sku_set = set(skus)
+    before = len(self.aliases_list)
+    self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() not in sku_set]
+    after = len(self.aliases_list)
+
     self._save_and_refresh()
     self.var_alias_sku.set("")
     self.var_alias_name.set("")
-    Log.warn(self.LOG_TAG, "Deleted alias.", {"sku": sku})
+    Log.warn(self.LOG_TAG, "Deleted aliases.", {"count": (before - after), "skus": skus})
 
   # -----------------------------------------------------------------------------
   # UI Actions
@@ -1895,17 +1924,25 @@ class InventoryApp(ctk.CTk):
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
-    sel = self._get_selected_tx_id()
-    if sel is None:
-      messagebox.showinfo("Delete", "Select a transaction row first.")
+    ids = self._get_selected_tx_ids()
+    if not ids:
+      messagebox.showinfo("Delete", "Select one or more transaction rows first.")
       return
 
-    if not messagebox.askyesno("Delete", f"Delete transaction ID {sel}?"):
+    preview = ", ".join(str(x) for x in ids[:10])
+    if len(ids) > 10:
+      preview += f", … (+{len(ids) - 10} more)"
+
+    if not messagebox.askyesno("Delete", f"Delete {len(ids)} selected transaction(s)?\n\nIDs: {preview}"):
       return
 
-    self.transactions = [t for t in self.transactions if t.id != sel]
+    id_set = set(ids)
+    before = len(self.transactions)
+    self.transactions = [t for t in self.transactions if t.id not in id_set]
+    after = len(self.transactions)
+
     self._save_and_refresh()
-    Log.warn(self.LOG_TAG, "Deleted transaction.", {"id": sel})
+    Log.warn(self.LOG_TAG, "Deleted transactions.", {"count": (before - after), "ids": ids})
 
   def _load_selected_into_form(self) -> None:
     sel = self._get_selected_tx_id()
@@ -2331,13 +2368,29 @@ class InventoryApp(ctk.CTk):
   # -----------------------------------------------------------------------------
 
   def _get_selected_tx_id(self) -> Optional[int]:
+    """
+    Get the "primary" selected transaction ID.
+    Keeps legacy single-select call sites working.
+    """
+    ids = self._get_selected_tx_ids()
+    return ids[0] if ids else None
+
+  def _get_selected_tx_ids(self) -> List[int]:
+    """
+    Get all selected transaction IDs (extended selection).
+    Returns a sorted list of ints.
+    """
     sel = self.tx_tree.selection()
     if not sel:
-      return None
-    try:
-      return int(sel[0])
-    except:
-      return None
+      return []
+    out: List[int] = []
+    for iid in sel:
+      try:
+        out.append(int(iid))
+      except Exception:
+        pass
+    out = sorted(set(out))
+    return out
 
   def _select_tx_id(self, tx_id: int) -> None:
     iid = str(tx_id)
