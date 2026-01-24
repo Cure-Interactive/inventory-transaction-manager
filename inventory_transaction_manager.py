@@ -12,6 +12,11 @@
   - Transactions persist to: <ProjectDir>/inventory_data.json
   - Recent project folders persist to: <ScriptDir>/config.json
 
+  NEW: SKU Aliases:
+  - Aliases persist to: <ProjectDir>/inventory_data.json (alongside transactions)
+  - Transactions + Overview tables show an Alias column (after SKU)
+  - Transactions form has an Alias dropdown that sets the SKU field
+
   Sorting:
   - Transactions are sorted by Date ascending, then by stable insertion order.
 
@@ -482,6 +487,14 @@ class InventoryApp(ctk.CTk):
     self.next_id = 1
     self.next_created_order = 1
 
+    # Aliases
+    # Stored as list of dicts: [{"sku": "...", "name": "..."}, ...]
+    self.aliases_list: List[Dict[str, str]] = []
+    self._alias_map: Dict[str, str] = {}  # normalized lookup (sku -> name)
+
+    # Guard flags for SKU/Alias UI syncing
+    self._alias_sync_guard = False
+
     self._build_ui()
 
     # Auto-load first recent project if available
@@ -490,6 +503,7 @@ class InventoryApp(ctk.CTk):
       self._load_project_dir(self.recent_project_dirs[0])
     else:
       self._refresh_all()
+      self._refresh_aliases_ui()
       self._set_tx_controls_enabled(False)
 
     Log.ok(self.LOG_TAG, "Ready.", {"recent_projects": len(self.recent_project_dirs)})
@@ -535,18 +549,65 @@ class InventoryApp(ctk.CTk):
   def _project_data_file_for_dir(self, project_dir: str) -> str:
     return os.path.join(os.path.abspath(project_dir), PROJECT_DATA_FILENAME)
 
-  def _load_transactions_from_file(self, path: str) -> List[Transaction]:
+  def _rebuild_alias_map(self) -> None:
+    """
+    Rebuild the fast lookup map (sku -> alias name) from self.aliases_list.
+    """
+    m: Dict[str, str] = {}
+    for item in (self.aliases_list or []):
+      if not isinstance(item, dict):
+        continue
+      sku = str(item.get("sku") or "").strip()
+      name = str(item.get("name") or "").strip()
+      if not sku or not name:
+        continue
+      m[sku] = name
+    self._alias_map = m
+
+  def _get_alias_for_sku(self, sku: str) -> str:
+    s = (sku or "").strip()
+    if not s:
+      return ""
+    return str(self._alias_map.get(s) or "").strip()
+
+  def _load_project_data_from_file(self, path: str) -> Tuple[List[Transaction], List[Dict[str, str]]]:
     if not os.path.exists(path):
-      return []
+      return [], []
     with open(path, "r", encoding="utf-8") as f:
       raw = json.load(f)
+
     txs: List[Transaction] = []
     for item in raw.get("transactions", []):
       txs.append(Transaction(**item))
-    return txs
 
-  def _save_transactions_to_file(self, path: str, txs: List[Transaction]) -> None:
-    payload = {"transactions": [asdict(t) for t in txs]}
+    aliases: List[Dict[str, str]] = []
+    raw_aliases = raw.get("aliases", [])
+    if isinstance(raw_aliases, dict):
+      # Legacy-ish fallback: {"SKU":"Name", ...}
+      for k, v in raw_aliases.items():
+        sku = str(k or "").strip()
+        name = str(v or "").strip()
+        if sku and name:
+          aliases.append({"sku": sku, "name": name})
+    elif isinstance(raw_aliases, list):
+      for a in raw_aliases:
+        if not isinstance(a, dict):
+          continue
+        sku = str(a.get("sku") or "").strip()
+        name = str(a.get("name") or "").strip()
+        if sku and name:
+          aliases.append({"sku": sku, "name": name})
+
+    # Stable sort for UI
+    aliases.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
+
+    return txs, aliases
+
+  def _save_project_data_to_file(self, path: str, txs: List[Transaction], aliases: List[Dict[str, str]]) -> None:
+    payload = {
+      "transactions": [asdict(t) for t in txs],
+      "aliases": list(aliases or []),
+    }
     _write_json_atomic(path, payload)
 
   def _load_project_dir(self, project_dir: str) -> None:
@@ -558,24 +619,32 @@ class InventoryApp(ctk.CTk):
     self.project_dir = p
     self.project_data_path = self._project_data_file_for_dir(p)
 
-    self.transactions = self._load_transactions_from_file(self.project_data_path)
+    txs, aliases = self._load_project_data_from_file(self.project_data_path)
+
+    self.transactions = txs
     self._normalize_sort()
+
+    self.aliases_list = aliases
+    self._rebuild_alias_map()
 
     self.next_id = (max([t.id for t in self.transactions], default=0) + 1)
     self.next_created_order = (max([t.created_order for t in self.transactions], default=0) + 1)
 
     self._remember_project_dir(p)
     self._set_tx_controls_enabled(True)
+
+    self._refresh_aliases_ui()
     self._refresh_all()
 
-    Log.ok(self.LOG_TAG, "Loaded project.", {"project_dir": p, "tx_count": len(self.transactions)})
+    Log.ok(self.LOG_TAG, "Loaded project.", {"project_dir": p, "tx_count": len(self.transactions), "alias_count": len(self.aliases_list)})
 
   def _save_and_refresh(self) -> None:
     if not self.project_data_path:
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     self._normalize_sort()
-    self._save_transactions_to_file(self.project_data_path, self.transactions)
+    self._save_project_data_to_file(self.project_data_path, self.transactions, self.aliases_list)
+    self._refresh_aliases_ui()
     self._refresh_all()
 
   # -----------------------------------------------------------------------------
@@ -613,9 +682,11 @@ class InventoryApp(ctk.CTk):
 
     self.tab_tx = self.tabs.add("Transactions")
     self.tab_ov = self.tabs.add("Overview")
+    self.tab_alias = self.tabs.add("Aliases")
 
     self._build_transactions_tab()
     self._build_overview_tab()
+    self._build_aliases_tab()
 
   def _build_transactions_tab(self) -> None:
     # Row 0: inputs. Row 1: note + action buttons. Row 2: table.
@@ -639,21 +710,41 @@ class InventoryApp(ctk.CTk):
     self.var_purchase_unit = tk.StringVar(value="1.00")
     self.var_sale_unit = tk.StringVar(value="3.00")
 
+    # Alias chooser (display-only selection; selecting sets SKU)
+    self.var_alias_choice = tk.StringVar(value="")
+
     # Single "unit" field that swaps meaning based on Type.
     self.var_unit_price = tk.StringVar(value=self.var_purchase_unit.get())
     self._last_type_for_unit = self.var_type.get()
 
     self.var_note = tk.StringVar(value="")
 
+    # Keep Alias dropdown synced when SKU typed
+    try:
+      self.var_sku.trace_add("write", lambda *_: self._sync_alias_choice_from_sku())
+    except Exception:
+      pass
+
     ctk.CTkLabel(form_row, text="Date").grid(row=0, column=0, padx=(10, 6), pady=10)
     self.entry_date = ctk.CTkEntry(form_row, textvariable=self.var_date, width=120)
     self.entry_date.grid(row=0, column=1, padx=6, pady=10)
 
     ctk.CTkLabel(form_row, text="SKU").grid(row=0, column=2, padx=(14, 6), pady=10)
-    self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=220)
+    self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=200)
     self.entry_sku.grid(row=0, column=3, padx=6, pady=10)
 
-    ctk.CTkLabel(form_row, text="Type").grid(row=0, column=4, padx=(14, 6), pady=10)
+    ctk.CTkLabel(form_row, text="Alias").grid(row=0, column=4, padx=(14, 6), pady=10)
+    self.alias_combo = ctk.CTkComboBox(
+      form_row,
+      variable=self.var_alias_choice,
+      values=[],
+      state="normal",
+      width=260,
+      command=lambda _choice: self._on_alias_selected_in_tx_form(),
+    )
+    self.alias_combo.grid(row=0, column=5, padx=6, pady=10)
+
+    ctk.CTkLabel(form_row, text="Type").grid(row=0, column=6, padx=(14, 6), pady=10)
     self.opt_type = ctk.CTkOptionMenu(
       form_row,
       values=[TX_PURCHASE, TX_SALE],
@@ -661,17 +752,17 @@ class InventoryApp(ctk.CTk):
       width=140,
       command=lambda _: self._sync_type_fields(),
     )
-    self.opt_type.grid(row=0, column=5, padx=6, pady=10)
+    self.opt_type.grid(row=0, column=7, padx=6, pady=10)
 
-    ctk.CTkLabel(form_row, text="Qty").grid(row=0, column=6, padx=(14, 6), pady=10)
+    ctk.CTkLabel(form_row, text="Qty").grid(row=0, column=8, padx=(14, 6), pady=10)
     self.entry_qty = ctk.CTkEntry(form_row, textvariable=self.var_qty, width=80)
-    self.entry_qty.grid(row=0, column=7, padx=6, pady=10)
+    self.entry_qty.grid(row=0, column=9, padx=6, pady=10)
 
     self.lbl_unit_price = ctk.CTkLabel(form_row, text="Purchase Unit Cost")
-    self.lbl_unit_price.grid(row=0, column=8, padx=(14, 6), pady=10)
+    self.lbl_unit_price.grid(row=0, column=10, padx=(14, 6), pady=10)
 
     self.entry_unit_price = ctk.CTkEntry(form_row, textvariable=self.var_unit_price, width=120)
-    self.entry_unit_price.grid(row=0, column=9, padx=6, pady=10)
+    self.entry_unit_price.grid(row=0, column=11, padx=6, pady=10)
 
     ctk.CTkLabel(action_row, text="Note").grid(row=0, column=0, padx=(10, 6), pady=(0, 10))
     self.entry_note = ctk.CTkEntry(action_row, textvariable=self.var_note)
@@ -713,7 +804,7 @@ class InventoryApp(ctk.CTk):
     table_frame.grid_rowconfigure(1, weight=0)
 
     columns = [
-      "id", "date", "sku", "type", "qty",
+      "id", "date", "sku", "alias", "type", "qty",
       "purchase_unit_cost", "sale_unit_price",
       "purchase_total_cost", "prev_avg_cost",
       "onhand_qty", "avg_cost_after",
@@ -758,6 +849,7 @@ class InventoryApp(ctk.CTk):
       "id": "ID",
       "date": "Date",
       "sku": "SKU",
+      "alias": "Alias",
       "type": "Type",
       "qty": "Qty",
       "purchase_unit_cost": "Purchase Unit Cost",
@@ -774,19 +866,19 @@ class InventoryApp(ctk.CTk):
     }
 
     widths = {
-      "id": 60, "date": 120, "sku": 220, "type": 120, "qty": 80,
+      "id": 60, "date": 120, "sku": 200, "alias": 260, "type": 120, "qty": 80,
       "purchase_unit_cost": 165, "sale_unit_price": 145,
       "purchase_total_cost": 175, "prev_avg_cost": 145,
       "onhand_qty": 120, "avg_cost_after": 130,
       "cogs": 130, "onhand_cost": 155, "sales_rev": 140, "gross_profit": 180,
       "note": 380,
-
     }
 
     col_anchor = {
       "id": "center",
       "date": "w",
       "sku": "w",
+      "alias": "w",
       "type": "center",
       "qty": "e",
       "purchase_unit_cost": "e",
@@ -827,7 +919,7 @@ class InventoryApp(ctk.CTk):
       )
 
     # ---------------------------------------------------------
-    # Fit columns: let ONLY ["sku", "note"] stretch when possible.
+    # Fit columns: let ONLY ["sku","alias","note"] stretch when possible.
     # If fixed columns exceed viewport, rely on h-scroll.
     # ---------------------------------------------------------
 
@@ -849,7 +941,7 @@ class InventoryApp(ctk.CTk):
 
       avail = max(frame_w - sb_w - 6, 64)
 
-      stretch_cols = ("sku", "note")
+      stretch_cols = ("sku", "alias", "note")
       fixed_cols = tuple(c for c in columns if c not in stretch_cols)
 
       fixed_w = 0
@@ -864,23 +956,35 @@ class InventoryApp(ctk.CTk):
 
       stretch_avail = max(avail - fixed_w, 64)
 
+      # Proportional split across N stretch columns based on current widths.
+      cur_w: Dict[str, int] = {}
+      total = 0
+      for c in stretch_cols:
+        try:
+          w = int(self.tx_tree.column(c, "width") or widths.get(c, 120) or 120)
+        except Exception:
+          w = int(widths.get(c, 120) or 120)
+        w = max(w, 32)
+        cur_w[c] = w
+        total += w
+
+      total = max(total, 1)
+
+      used = 0
+      for c in stretch_cols[:-1]:
+        new_w = max(32, int(stretch_avail * (cur_w[c] / total)))
+        used += new_w
+        try:
+          self.tx_tree.column(c, width=new_w)
+        except Exception:
+          pass
+
+      last_c = stretch_cols[-1]
+      last_w = max(32, int(stretch_avail - used))
       try:
-        w_sku = int(self.tx_tree.column("sku", "width") or 1)
+        self.tx_tree.column(last_c, width=last_w)
       except Exception:
-        w_sku = widths.get("sku", 220)
-      try:
-        w_note = int(self.tx_tree.column("note", "width") or 1)
-      except Exception:
-        w_note = widths.get("note", 320)
-
-      total = max(w_sku + w_note, 1)
-      min_w = 32
-
-      new_sku = max(min_w, int(stretch_avail * (w_sku / total)))
-      new_note = max(min_w, int(stretch_avail - new_sku))
-
-      self.tx_tree.column("sku", width=new_sku)
-      self.tx_tree.column("note", width=new_note)
+        pass
 
     def _fit_columns_debounced(_event=None) -> None:
       if _fit_after_id["id"] is not None:
@@ -1125,7 +1229,7 @@ class InventoryApp(ctk.CTk):
         # Even-split ALL monthly columns across the viewport.
         stretch_cols = list(cols)
       else:
-        stretch_cols = [c for c in ["sku", "status"] if c in cols]
+        stretch_cols = [c for c in ["sku", "alias", "status"] if c in cols]
 
       fixed_cols = [c for c in cols if c not in stretch_cols]
 
@@ -1299,6 +1403,86 @@ class InventoryApp(ctk.CTk):
     # Configure initial view columns
     self._configure_overview_tree_for_view()
 
+  def _build_aliases_tab(self) -> None:
+    self.tab_alias.grid_rowconfigure(1, weight=1)
+    self.tab_alias.grid_columnconfigure(0, weight=1)
+
+    form = ctk.CTkFrame(self.tab_alias)
+    form.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+
+    ctk.CTkLabel(form, text="SKU").grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
+    self.var_alias_sku = tk.StringVar(value="")
+    self.entry_alias_sku = ctk.CTkEntry(form, textvariable=self.var_alias_sku, width=220)
+    self.entry_alias_sku.grid(row=0, column=1, padx=6, pady=10, sticky="w")
+
+    ctk.CTkLabel(form, text="Name").grid(row=0, column=2, padx=(14, 6), pady=10, sticky="w")
+    self.var_alias_name = tk.StringVar(value="")
+    self.entry_alias_name = ctk.CTkEntry(form, textvariable=self.var_alias_name, width=360)
+    self.entry_alias_name.grid(row=0, column=3, padx=6, pady=10, sticky="w")
+
+    btns = ctk.CTkFrame(form, fg_color="transparent")
+    btns.grid(row=0, column=4, padx=(12, 10), pady=10, sticky="e")
+
+    self.btn_alias_add = ctk.CTkButton(btns, text="Add", width=110, command=self._on_alias_add)
+    self.btn_alias_add.grid(row=0, column=0, padx=6)
+
+    self.btn_alias_update = ctk.CTkButton(btns, text="Update Selected", width=160, command=self._on_alias_update_selected)
+    self.btn_alias_update.grid(row=0, column=1, padx=6)
+
+    self.btn_alias_delete = ctk.CTkButton(
+      btns,
+      text="Delete Selected",
+      width=150,
+      fg_color="#8B2D2D",
+      hover_color="#A53636",
+      command=self._on_alias_delete_selected,
+    )
+    self.btn_alias_delete.grid(row=0, column=2, padx=6)
+
+    # Table
+    table_frame = ctk.CTkFrame(self.tab_alias)
+    table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
+    table_frame.grid_rowconfigure(0, weight=1)
+    table_frame.grid_columnconfigure(0, weight=1)
+    table_frame.grid_rowconfigure(1, weight=0)
+
+    self.alias_tree = ttk.Treeview(
+      table_frame,
+      columns=["sku", "name"],
+      show="headings",
+      height=18,
+      selectmode="extended",
+      style="Treeview",
+    )
+    self.alias_tree.grid(row=0, column=0, sticky="nsew")
+
+    vsb = ttk.Scrollbar(
+      table_frame,
+      orient="vertical",
+      command=self.alias_tree.yview,
+      style="Dark.Vertical.TScrollbar",
+    )
+    hsb = ttk.Scrollbar(
+      table_frame,
+      orient="horizontal",
+      command=self.alias_tree.xview,
+      style="Dark.Horizontal.TScrollbar",
+    )
+    self.alias_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
+
+    self.alias_tree.tag_configure("odd",  background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"]))
+    self.alias_tree.tag_configure("even", background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]))
+
+    heading_gutter = "  "
+    self.alias_tree.heading("sku", text=f"SKU{heading_gutter}", anchor="w")
+    self.alias_tree.heading("name", text="Name", anchor="w")
+    self.alias_tree.column("sku", width=240, minwidth=80, anchor="w", stretch=False)
+    self.alias_tree.column("name", width=520, minwidth=120, anchor="w", stretch=True)
+
+    self.alias_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_alias_into_form())
+
   # -----------------------------------------------------------------------------
   # Project bar callbacks
   # -----------------------------------------------------------------------------
@@ -1329,9 +1513,12 @@ class InventoryApp(ctk.CTk):
     self.project_dir = ""
     self.project_data_path = ""
     self.transactions = []
+    self.aliases_list = []
+    self._rebuild_alias_map()
     self.next_id = 1
     self.next_created_order = 1
     self._set_tx_controls_enabled(False)
+    self._refresh_aliases_ui()
     self._refresh_all()
 
   # -----------------------------------------------------------------------------
@@ -1343,7 +1530,15 @@ class InventoryApp(ctk.CTk):
     state_btn = "normal" if enabled else "disabled"
 
     for w in [self.entry_date, self.entry_sku, self.entry_qty, self.entry_unit_price, self.entry_note]:
+      try:
+        w.configure(state=state_entry)
+      except Exception:
+        pass
 
+    # Alias dropdown
+    for w in [getattr(self, "alias_combo", None)]:
+      if w is None:
+        continue
       try:
         w.configure(state=state_entry)
       except Exception:
@@ -1361,7 +1556,7 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
-    # Overview tab controls (optional until UI built)
+    # Overview tab controls
     for w in [getattr(self, "opt_ov_view", None)]:
       if w is None:
         continue
@@ -1377,6 +1572,252 @@ class InventoryApp(ctk.CTk):
         b.configure(state=state_btn)
       except Exception:
         pass
+
+    # Aliases tab controls
+    for w in [getattr(self, "entry_alias_sku", None), getattr(self, "entry_alias_name", None)]:
+      if w is None:
+        continue
+      try:
+        w.configure(state=state_entry)
+      except Exception:
+        pass
+
+    for b in [getattr(self, "btn_alias_add", None), getattr(self, "btn_alias_update", None), getattr(self, "btn_alias_delete", None)]:
+      if b is None:
+        continue
+      try:
+        b.configure(state=state_btn)
+      except Exception:
+        pass
+
+  # -----------------------------------------------------------------------------
+  # Alias UI syncing (Transactions form dropdown)
+  # -----------------------------------------------------------------------------
+
+  def _build_alias_display_values(self) -> List[str]:
+    """
+    Build Alias dropdown display values.
+
+    Format:
+      "<Name>  [<SKU>]"
+    """
+    out: List[str] = []
+    for a in (self.aliases_list or []):
+      sku = str(a.get("sku") or "").strip()
+      name = str(a.get("name") or "").strip()
+      if not sku or not name:
+        continue
+      out.append(f"{name}  [{sku}]")
+    out.sort(key=lambda s: s.lower())
+    return out
+
+  def _parse_alias_display_value(self, s: str) -> Tuple[str, str]:
+    """
+    Parse "<Name>  [<SKU>]" -> (sku, name)
+    """
+    raw = str(s or "").strip()
+    if not raw:
+      return "", ""
+    m = re.search(r"\[(.+?)\]\s*$", raw)
+    if not m:
+      return "", raw
+    sku = m.group(1).strip()
+    name = raw[: m.start()].strip()
+    return sku, name
+
+  def _refresh_alias_dropdown(self) -> None:
+    if not hasattr(self, "alias_combo"):
+      return
+    values = [""] + self._build_alias_display_values()
+    try:
+      self.alias_combo.configure(values=values)
+    except Exception:
+      pass
+    # Keep selection consistent with current SKU
+    self._sync_alias_choice_from_sku()
+
+  def _sync_alias_choice_from_sku(self) -> None:
+    if self._alias_sync_guard:
+      return
+    self._alias_sync_guard = True
+    try:
+      sku = (self.var_sku.get() or "").strip()
+      name = self._get_alias_for_sku(sku)
+      if sku and name:
+        disp = f"{name}  [{sku}]"
+        try:
+          self.var_alias_choice.set(disp)
+        except Exception:
+          pass
+      else:
+        try:
+          if (self.var_alias_choice.get() or "").strip():
+            self.var_alias_choice.set("")
+        except Exception:
+          pass
+    finally:
+      self._alias_sync_guard = False
+
+  def _on_alias_selected_in_tx_form(self) -> None:
+    if self._alias_sync_guard:
+      return
+    self._alias_sync_guard = True
+    try:
+      choice = (self.var_alias_choice.get() or "").strip()
+      if not choice:
+        return
+      sku, _name = self._parse_alias_display_value(choice)
+      if sku:
+        self.var_sku.set(sku)
+        try:
+          self.entry_qty.focus_set()
+        except Exception:
+          pass
+    finally:
+      self._alias_sync_guard = False
+
+  # -----------------------------------------------------------------------------
+  # Aliases Tab Actions
+  # -----------------------------------------------------------------------------
+
+  def _refresh_aliases_ui(self) -> None:
+    """
+    Refresh alias tab table + transactions form dropdown.
+    Safe to call even before UI exists.
+    """
+    self._rebuild_alias_map()
+    self._refresh_alias_dropdown()
+
+    if not hasattr(self, "alias_tree"):
+      return
+
+    try:
+      self.alias_tree.delete(*self.alias_tree.get_children())
+    except Exception:
+      return
+
+    rows = list(self.aliases_list or [])
+    rows.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
+
+    for i, a in enumerate(rows):
+      sku = str(a.get("sku") or "").strip()
+      name = str(a.get("name") or "").strip()
+      if not sku or not name:
+        continue
+      pad_l = "  "
+      values = (f"{pad_l}{sku}", f"{pad_l}{name}")
+      tag = "even" if (i % 2) == 0 else "odd"
+      self.alias_tree.insert("", "end", iid=sku, values=values, tags=(tag,))
+
+  def _get_selected_alias_sku(self) -> Optional[str]:
+    if not hasattr(self, "alias_tree"):
+      return None
+    sel = self.alias_tree.selection()
+    if not sel:
+      return None
+    return str(sel[0])
+
+  def _load_selected_alias_into_form(self) -> None:
+    sku = self._get_selected_alias_sku()
+    if not sku:
+      return
+    name = self._get_alias_for_sku(sku)
+    self.var_alias_sku.set(sku)
+    self.var_alias_name.set(name)
+
+  def _read_alias_form(self) -> Tuple[str, str]:
+    sku = str(self.var_alias_sku.get() or "").strip()
+    name = str(self.var_alias_name.get() or "").strip()
+    if not sku:
+      raise ValueError("Alias SKU is required")
+    if not name:
+      raise ValueError("Alias Name is required")
+    return sku, name
+
+  def _upsert_alias(self, sku: str, name: str) -> None:
+    sku = str(sku or "").strip()
+    name = str(name or "").strip()
+    if not sku or not name:
+      return
+
+    found = False
+    for a in self.aliases_list:
+      if str(a.get("sku") or "").strip() == sku:
+        a["name"] = name
+        found = True
+        break
+
+    if not found:
+      self.aliases_list.append({"sku": sku, "name": name})
+
+    self.aliases_list.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
+
+  def _on_alias_add(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    try:
+      sku, name = self._read_alias_form()
+    except Exception as e:
+      messagebox.showerror("Invalid", str(e))
+      return
+
+    self._upsert_alias(sku, name)
+    self._save_and_refresh()
+    try:
+      if hasattr(self, "alias_tree") and self.alias_tree.exists(sku):
+        self.alias_tree.selection_set(sku)
+        self.alias_tree.focus(sku)
+        self.alias_tree.see(sku)
+    except Exception:
+      pass
+    Log.ok(self.LOG_TAG, "Added/updated alias.", {"sku": sku})
+
+  def _on_alias_update_selected(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    sel_sku = self._get_selected_alias_sku()
+    if not sel_sku:
+      messagebox.showinfo("Update", "Select an alias row first.")
+      return
+    try:
+      sku, name = self._read_alias_form()
+    except Exception as e:
+      messagebox.showerror("Invalid", str(e))
+      return
+
+    if sku != sel_sku:
+      # Renaming SKU key: delete old, insert new
+      self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sel_sku]
+    self._upsert_alias(sku, name)
+
+    self._save_and_refresh()
+    try:
+      if hasattr(self, "alias_tree") and self.alias_tree.exists(sku):
+        self.alias_tree.selection_set(sku)
+        self.alias_tree.focus(sku)
+        self.alias_tree.see(sku)
+    except Exception:
+      pass
+    Log.ok(self.LOG_TAG, "Updated alias.", {"sku": sel_sku, "new_sku": sku})
+
+  def _on_alias_delete_selected(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    sku = self._get_selected_alias_sku()
+    if not sku:
+      messagebox.showinfo("Delete", "Select an alias row first.")
+      return
+    if not messagebox.askyesno("Delete Alias", f"Delete alias for SKU:\n\n{sku}"):
+      return
+
+    self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sku]
+    self._save_and_refresh()
+    self.var_alias_sku.set("")
+    self.var_alias_name.set("")
+    Log.warn(self.LOG_TAG, "Deleted alias.", {"sku": sku})
 
   # -----------------------------------------------------------------------------
   # UI Actions
@@ -1490,6 +1931,7 @@ class InventoryApp(ctk.CTk):
 
     self.var_note.set(tx.note or "")
     self._sync_type_fields()
+    self._sync_alias_choice_from_sku()
 
   def _read_form_to_transaction(self, existing_id: Optional[int]) -> Transaction:
     date = parse_date(self.var_date.get())
@@ -1582,10 +2024,14 @@ class InventoryApp(ctk.CTk):
       # Fake "cell padding" for left-aligned text fields (Treeview has no per-cell padding on Windows ttk)
       pad_l = "  "  # 2 spaces
 
+      sku = str(r.get("sku") or "").strip()
+      alias = self._get_alias_for_sku(sku)
+
       values = (
         r["id"],
         f"{pad_l}{r['date']}",
-        f"{pad_l}{r['sku']}",
+        f"{pad_l}{sku}",
+        f"{pad_l}{alias}" if alias else "",
         r["type"],
         r["qty"],
         money(r["purchase_unit_cost"]) if r["type"] == TX_PURCHASE else "",
@@ -1646,9 +2092,10 @@ class InventoryApp(ctk.CTk):
         "cogs": "e",
       }
     else:
-      columns = ["sku", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+      columns = ["sku", "alias", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
       headings = {
         "sku": "SKU",
+        "alias": "Alias",
         "onhand_qty": "OnHand Qty",
         "avg_cost": "Avg Cost",
         "onhand_cost": "OnHand Cost",
@@ -1657,7 +2104,8 @@ class InventoryApp(ctk.CTk):
         "status": "Status",
       }
       widths = {
-        "sku": 240,
+        "sku": 220,
+        "alias": 260,
         "onhand_qty": 120,
         "avg_cost": 120,
         "onhand_cost": 170,
@@ -1667,6 +2115,7 @@ class InventoryApp(ctk.CTk):
       }
       col_anchor = {
         "sku": "w",
+        "alias": "w",
         "onhand_qty": "e",
         "avg_cost": "e",
         "onhand_cost": "e",
@@ -1769,8 +2218,11 @@ class InventoryApp(ctk.CTk):
       s = overview[sku]
       pad_l = "  "  # 2 spaces
 
+      alias = self._get_alias_for_sku(str(s.get("sku") or "").strip())
+
       values = (
         f"{pad_l}{s['sku']}",
+        f"{pad_l}{alias}" if alias else "",
         s["onhand_qty"],
         money(s["avg_cost"]),
         money(s["onhand_cost"]),
@@ -1844,6 +2296,7 @@ class InventoryApp(ctk.CTk):
         s = overview[sku]
         data_rows.append({
           "sku": s["sku"],
+          "alias": self._get_alias_for_sku(str(s.get("sku") or "").strip()),
           "onhand_qty": s["onhand_qty"],
           "avg_cost": float(s["avg_cost"]),
           "onhand_cost": float(s["onhand_cost"]),
@@ -1851,7 +2304,7 @@ class InventoryApp(ctk.CTk):
           "last_sale_price": float(s["last_sale_price"]),
           "status": s["status"],
         })
-      headers = ["sku", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+      headers = ["sku", "alias", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
 
     try:
       with open(path, "w", encoding="utf-8", newline="") as f:
@@ -1915,7 +2368,7 @@ class InventoryApp(ctk.CTk):
     rows, _ = self.engine.compute(self.transactions)
 
     headers = [
-      "id","date","sku","type","qty",
+      "id","date","sku","alias","type","qty",
       "purchase_unit_cost","sale_unit_price",
       "purchase_total_cost","prev_avg_cost",
       "onhand_qty","avg_cost_after",
@@ -1927,9 +2380,14 @@ class InventoryApp(ctk.CTk):
       with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(",".join(headers) + "\n")
         for r in rows:
+          # add alias on the fly (not part of engine rows)
+          sku = str(r.get("sku") or "").strip()
+          r2 = dict(r)
+          r2["alias"] = self._get_alias_for_sku(sku)
+
           line = []
           for h in headers:
-            v = r.get(h, "")
+            v = r2.get(h, "")
             if isinstance(v, str):
               if "," in v or '"' in v:
                 v = '"' + v.replace('"', '""') + '"'
