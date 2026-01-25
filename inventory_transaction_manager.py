@@ -37,6 +37,15 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+# =============================================================================
+# Optional dependency: tkcalendar (nice date picker)
+#   pip install tkcalendar
+# =============================================================================
+try:
+  from tkcalendar import Calendar  # type: ignore
+except Exception:
+  Calendar = None  # type: ignore
+
 def apply_entry_shortcuts(entry_widget) -> None:
   """
   Normalize common text shortcuts across OS for Tk/CustomTkinter entries:
@@ -834,7 +843,9 @@ class InventoryApp(ctk.CTk):
     # Transactions form (labels will inherit via _attach)
     for w, msg in [
       (getattr(self, "entry_date", None), "Date: transaction date (YYYY-MM-DD or M/D/YYYY)."),
+      (getattr(self, "btn_date_pick", None), "Pick Date: open a calendar selector to set the Date field."),
       (getattr(self, "entry_sku", None), "SKU: item identifier used for costing/aggregation."),
+
       (getattr(self, "lbl_tx_alias", None), "Alias: type to filter by alias name OR SKU; selecting an alias sets the SKU field."),
       (getattr(self, "entry_alias", None), "Alias: type to filter by alias name OR SKU; selecting an alias sets the SKU field."),
       (getattr(self, "btn_alias_drop", None), "Alias dropdown: show all aliases; typing filters by alias name OR SKU."),
@@ -1175,9 +1186,295 @@ class InventoryApp(ctk.CTk):
       pass
 
     ctk.CTkLabel(form_row, text="Date").grid(row=0, column=0, padx=(10, 6), pady=10)
-    self.entry_date = ctk.CTkEntry(form_row, textvariable=self.var_date, width=120)
-    self.entry_date.grid(row=0, column=1, padx=6, pady=10)
+
+    # Date picker (entry + calendar button)
+    self.date_picker = ctk.CTkFrame(form_row, fg_color="transparent")
+    self.date_picker.grid(row=0, column=1, padx=6, pady=10, sticky="w")
+
+    self.entry_date = ctk.CTkEntry(self.date_picker, textvariable=self.var_date, width=120)
+    self.entry_date.grid(row=0, column=0)
     apply_entry_shortcuts(self.entry_date)
+
+    self.btn_date_pick = ctk.CTkButton(self.date_picker, text="📅", width=32, command=self._on_pick_date)
+    self.btn_date_pick.grid(row=0, column=1, padx=(6, 0))
+
+    # -------------------------------------------------------------------------
+    # In-window Date dropdown (themed overlay; no separate popup window)
+    # -------------------------------------------------------------------------
+
+    # Overlay dropdown (parent is Transactions tab so it can overlay tab contents)
+    self._date_dropdown = ctk.CTkFrame(self.tab_tx, corner_radius=10, border_width=1)
+    self._date_dropdown.place_forget()
+    self._date_dropdown_visible = False
+
+    # Theme colors (match CTk dark mode)
+    _date_bg       = _ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+    _date_bg_alt   = _ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"])
+    _date_fg       = _ctk_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+    _date_accent   = _ctk_color(ctk.ThemeManager.theme["CTkButton"]["fg_color"])
+    _date_accent_h = _ctk_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+
+    # Calendar is a Tk widget; we host it inside a Tk frame so bg matches cleanly.
+    self._date_cal_host = tk.Frame(self._date_dropdown, bg=_date_bg)
+    self._date_cal_host.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
+
+    # Buttons row (CTk)
+    self._date_btn_row = ctk.CTkFrame(self._date_dropdown, fg_color="transparent")
+    self._date_btn_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+    self._date_btn_row.grid_columnconfigure(0, weight=1)
+    self._date_btn_row.grid_columnconfigure(1, weight=1)
+    self._date_btn_row.grid_columnconfigure(2, weight=1)
+
+    self._date_btn_today  = ctk.CTkButton(self._date_btn_row, text="Today",  width=90)
+    self._date_btn_ok     = ctk.CTkButton(self._date_btn_row, text="OK",     width=90)
+    self._date_btn_cancel = ctk.CTkButton(self._date_btn_row, text="Cancel", width=90)
+
+    self._date_btn_today.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+    self._date_btn_ok.grid(row=0, column=1, padx=8, sticky="ew")
+    self._date_btn_cancel.grid(row=0, column=2, padx=(8, 0), sticky="ew")
+
+    # We create/destroy Calendar instance as needed (tkcalendar can be optional).
+    self._date_cal = None
+
+    _date_state = {"after_id": None}
+
+    def _date_is_descendant(widget: Any, parent: Any) -> bool:
+      try:
+        w = widget
+        while w is not None:
+          if w == parent:
+            return True
+          w = getattr(w, "master", None)
+      except Exception:
+        pass
+      return False
+
+    def _date_dropdown_hide() -> None:
+      if not getattr(self, "_date_dropdown_visible", False):
+        return
+      try:
+        self._date_dropdown.place_forget()
+      except Exception:
+        pass
+      self._date_dropdown_visible = False
+
+    def _date_dropdown_place_near_entry(*, prefer_below: bool = True) -> None:
+      """
+      Place dropdown near the date picker, clamped inside the Transactions tab.
+      Tries below first; if not enough space, flips above.
+      """
+      try:
+        self.update_idletasks()
+
+        # Entry screen coords
+        ex = int(self.entry_date.winfo_rootx())
+        ey = int(self.entry_date.winfo_rooty())
+        eh = int(self.entry_date.winfo_height())
+
+        # Tab screen coords
+        tx = int(self.tab_tx.winfo_rootx())
+        ty = int(self.tab_tx.winfo_rooty())
+        tw = int(self.tab_tx.winfo_width() or 0)
+        th = int(self.tab_tx.winfo_height() or 0)
+
+        # Convert to coords relative to tab
+        x = ex - tx
+        y_below = (ey - ty) + eh
+        y_above = (ey - ty)
+
+        # Width matches the picker (entry+button)
+        w_drop = int(self.date_picker.winfo_width() or 0)
+        if w_drop <= 10:
+          w_drop = 320
+
+        try:
+          self._date_dropdown.configure(width=w_drop)
+        except Exception:
+          pass
+
+        # Measure content height
+        self._date_dropdown.update_idletasks()
+        try:
+          content_h = int(self._date_dropdown.winfo_reqheight() or 280)
+        except Exception:
+          content_h = 280
+
+        # Available space
+        below_space = max(th - y_below - 6, 0)
+        above_space = max(y_above - 6, 0)
+
+        use_below = prefer_below
+        if use_below and below_space < content_h and above_space > below_space:
+          use_below = False
+        elif (not use_below) and above_space < content_h and below_space > above_space:
+          use_below = True
+
+        if use_below:
+          y = max(0, y_below - 1)
+        else:
+          y = max(0, y_above - content_h - 1)
+
+        # Clamp X inside tab
+        if tw > 40:
+          x = max(0, min(x, max(tw - w_drop - 6, 0)))
+
+        self._date_dropdown.place(x=x, y=y)
+        self._date_dropdown.lift()
+        self._date_dropdown_visible = True
+      except Exception:
+        _date_dropdown_hide()
+
+    def _date_calendar_rebuild(year: int, month: int, day: int) -> None:
+      """
+      (Re)create the tkcalendar Calendar inside the host, themed to CTk colors.
+      """
+      try:
+        for child in self._date_cal_host.winfo_children():
+          child.destroy()
+      except Exception:
+        pass
+
+      from tkinter import font as tkfont
+
+      # Match your table font sizes (Treeview uses 12/13 in apply_dark_ttk_treeview_style()).
+      _cal_font = tkfont.nametofont("TkDefaultFont").copy()
+      _cal_font.configure(size=13)
+
+      _cal_headers_font = _cal_font.copy()
+      _cal_headers_font.configure(size=14, weight="bold")
+
+      self._date_cal = Calendar(
+        self._date_cal_host,
+        selectmode="day",
+        year=int(year),
+        month=int(month),
+        day=int(day),
+        date_pattern="yyyy-mm-dd",
+
+        # ✅ Font sizing
+        font=_cal_font,
+        headersfont=_cal_headers_font,
+
+        # Theme colors
+        background=_date_bg,
+        foreground=_date_fg,
+        bordercolor=_date_bg,
+        headersbackground=_date_bg_alt,
+        headersforeground=_date_fg,
+        selectbackground=_date_accent,
+        selectforeground=_date_fg,
+        normalbackground=_date_bg,
+        normalforeground=_date_fg,
+        weekendbackground=_date_bg,
+        weekendforeground=_date_fg,
+        othermonthbackground=_date_bg,
+        othermonthforeground="#707070",
+        othermonthwebackground=_date_bg,
+        othermonthweforeground="#707070",
+      )
+
+      self._date_cal.pack(fill="both", expand=True)
+
+    def _date_dropdown_show_from_current_entry() -> None:
+      if Calendar is None:
+        messagebox.showinfo(
+          "Date Picker",
+          "Calendar picker requires optional dependency:\n\n"
+          "  pip install tkcalendar\n\n"
+          "You can still type the date as YYYY-MM-DD or M/D/YYYY."
+        )
+        try:
+          self.entry_date.focus_set()
+        except Exception:
+          pass
+        return
+
+      # Parse current date (best-effort)
+      try:
+        cur = parse_date(self.var_date.get())
+        y = int(cur[0:4]); m = int(cur[5:7]); d = int(cur[8:10])
+      except Exception:
+        now = datetime.now()
+        y, m, d = now.year, now.month, now.day
+
+      _date_calendar_rebuild(y, m, d)
+      _date_dropdown_place_near_entry(prefer_below=True)
+
+    def _date_ok() -> None:
+      picked = ""
+      try:
+        if self._date_cal is not None:
+          picked = str(self._date_cal.get_date() or "").strip()
+      except Exception:
+        picked = ""
+
+      if picked:
+        try:
+          self.var_date.set(parse_date(picked))
+        except Exception:
+          self.var_date.set(picked)
+
+      _date_dropdown_hide()
+
+      try:
+        self.entry_date.focus_set()
+        self.entry_date.icursor(tk.END)
+      except Exception:
+        pass
+
+    def _date_today() -> None:
+      try:
+        if self._date_cal is not None:
+          self._date_cal.selection_set(datetime.now().strftime("%Y-%m-%d"))
+      except Exception:
+        pass
+
+    def _date_cancel() -> None:
+      _date_dropdown_hide()
+      try:
+        self.entry_date.focus_set()
+      except Exception:
+        pass
+
+    self._date_btn_today.configure(command=_date_today)
+    self._date_btn_ok.configure(command=_date_ok)
+    self._date_btn_cancel.configure(command=_date_cancel)
+
+    def _date_toggle_dropdown() -> None:
+      if getattr(self, "_date_dropdown_visible", False):
+        _date_dropdown_hide()
+      else:
+        _date_dropdown_show_from_current_entry()
+
+    # Store helpers for use elsewhere (like disable/enable)
+    self._date_dropdown_hide = _date_dropdown_hide
+    self._date_dropdown_toggle = _date_toggle_dropdown
+    self._date_dropdown_show = _date_dropdown_show_from_current_entry
+
+    # Esc closes date dropdown (when date entry focused)
+    self.entry_date.bind("<Escape>", lambda _e: _date_dropdown_hide())
+
+    # Clicking outside closes dropdown
+    if not getattr(self, "_date_outside_click_bound", False):
+      self._date_outside_click_bound = True
+
+      def _on_any_click_close_date(e) -> None:
+        try:
+          w = e.widget
+
+          # Inside date picker (entry + button) = keep open
+          if _date_is_descendant(w, self.date_picker):
+            return
+
+          # Inside dropdown = keep open
+          if _date_is_descendant(w, self._date_dropdown):
+            return
+
+          _date_dropdown_hide()
+        except Exception:
+          pass
+
+      self.bind_all("<Button-1>", _on_any_click_close_date, add="+")
 
     ctk.CTkLabel(form_row, text="SKU").grid(row=0, column=2, padx=(14, 6), pady=10)
     self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=200)
@@ -2485,6 +2782,36 @@ class InventoryApp(ctk.CTk):
     self.alias_tree.bind("<<TreeviewSelect>>", _on_alias_tree_select)
 
 
+  def _on_pick_date(self) -> None:
+    """
+    Toggle the in-window calendar dropdown and set the Transactions form Date field.
+
+    Behavior:
+      - If tkcalendar is available: show a themed overlay calendar (inside the main window).
+      - If not available: show a short info message (keeps app dependency-light).
+    """
+    try:
+      # Overlay helpers are created during _build_transactions_tab()
+      toggle = getattr(self, "_date_dropdown_toggle", None)
+      if callable(toggle):
+        toggle()
+        return
+    except Exception:
+      pass
+
+    # Fallback (shouldn't happen unless UI not built yet)
+    if Calendar is None:
+      messagebox.showinfo(
+        "Date Picker",
+        "Calendar picker requires optional dependency:\n\n"
+        "  pip install tkcalendar\n\n"
+        "You can still type the date as YYYY-MM-DD or M/D/YYYY."
+      )
+      try:
+        self.entry_date.focus_set()
+      except Exception:
+        pass
+
   # -----------------------------------------------------------------------------
   # Project bar callbacks
   # -----------------------------------------------------------------------------
@@ -2537,6 +2864,14 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
+    for w in [getattr(self, "btn_date_pick", None)]:
+      if w is None:
+        continue
+      try:
+        w.configure(state=("normal" if enabled else "disabled"))
+      except Exception:
+        pass
+
     # Alias picker (Entry + dropdown button)
     for w in [getattr(self, "entry_alias", None), getattr(self, "btn_alias_drop", None)]:
       if w is None:
@@ -2550,6 +2885,12 @@ class InventoryApp(ctk.CTk):
       try:
         if hasattr(self, "_alias_dropdown_hide"):
           self._alias_dropdown_hide()
+      except Exception:
+        pass
+
+      try:
+        if hasattr(self, "_date_dropdown_hide"):
+          self._date_dropdown_hide()
       except Exception:
         pass
 

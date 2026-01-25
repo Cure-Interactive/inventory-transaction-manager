@@ -5,3 +5,4 @@
 
 customtkinter>=5.2.2
 CTkToolTip>=0.8
+tkcalendar>=1.6.1
