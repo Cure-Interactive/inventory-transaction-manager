@@ -800,7 +800,8 @@ class InventoryApp(ctk.CTk):
       (getattr(self, "entry_unit_price", None), "Unit Price: purchase cost per unit (for Purchase) or sale price per unit (for Sale)."),
       (getattr(self, "entry_note", None), "Note: optional text for receipts, customer, order, etc."),
       (getattr(self, "btn_add", None), "Add: append a new transaction row."),
-      (getattr(self, "btn_update", None), "Update: modify the selected transaction row."),
+      (getattr(self, "btn_update", None), "Update Selected: edit the selected transaction row. Enabled only when exactly one row is selected."),
+
       (getattr(self, "btn_delete", None), "Delete: remove the selected transaction row."),
       (getattr(self, "btn_export", None), "Export: write transactions to a CSV file for sharing/backup."),
       (getattr(self, "tx_tree", None), "Transactions table: hover cells for exact values; click rows to select."),
@@ -820,7 +821,8 @@ class InventoryApp(ctk.CTk):
       (getattr(self, "entry_alias_name", None), "Alias Name: friendly display name (e.g., 'NES Controller')."),
       (getattr(self, "entry_alias_sku", None), "Alias SKU: the SKU value this alias maps to."),
       (getattr(self, "btn_alias_add", None), "Add Alias: create a new alias mapping."),
-      (getattr(self, "btn_alias_update", None), "Update Alias: update the selected alias mapping."),
+      (getattr(self, "btn_alias_update", None), "Update Selected: edit the selected alias mapping. Enabled only when exactly one row is selected."),
+
       (getattr(self, "btn_alias_delete", None), "Delete Alias: remove the selected alias mapping."),
       (getattr(self, "alias_tree", None), "Aliases table: select an alias to edit or delete."),
     ]:
@@ -1255,13 +1257,39 @@ class InventoryApp(ctk.CTk):
         # Commit selection behavior (sets SKU) but DO NOT move focus away.
         self._on_alias_selected_in_tx_form()
 
-        # Put caret back in alias entry
-        try:
-          self.entry_alias.focus_set()
-          # no icursor call
+        # Put caret back in alias entry (move cursor to end)
+        def _focus_alias_end() -> None:
+          try:
+            self.entry_alias.focus_set()
+          except Exception:
+            return
 
+          # Best-effort: CTkEntry sometimes wraps the underlying tk.Entry as `_entry`
+          try:
+            self.entry_alias.icursor(tk.END)
+            try:
+              self.entry_alias.xview_moveto(1.0)  # ensure end is visible
+            except Exception:
+              pass
+            return
+          except Exception:
+            pass
+
+          try:
+            inner = getattr(self.entry_alias, "_entry", None)
+            if inner is not None:
+              inner.icursor(tk.END)
+              try:
+                inner.xview_moveto(1.0)
+              except Exception:
+                pass
+          except Exception:
+            pass
+
+        try:
+          self.after(1, _focus_alias_end)
         except Exception:
-          pass
+          _focus_alias_end()
 
       for i, v in enumerate(shown):
         btn = ctk.CTkButton(
@@ -1807,7 +1835,12 @@ class InventoryApp(ctk.CTk):
 
     self._tx_tree_tip_hide = _tree_tip_hide
 
-    self.tx_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_into_form())
+    def _on_tx_tree_select(_e=None) -> None:
+      self._load_selected_into_form()
+      self._sync_tx_update_selected_state()
+
+    self.tx_tree.bind("<<TreeviewSelect>>", _on_tx_tree_select)
+
     self._sync_type_fields()
 
   def _build_overview_tab(self) -> None:
@@ -2393,7 +2426,12 @@ class InventoryApp(ctk.CTk):
     self.alias_tree.bind("<Button-4>", lambda _e: _alias_tip_hide())
     self.alias_tree.bind("<Button-5>", lambda _e: _alias_tip_hide())
 
-    self.alias_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_alias_into_form())
+    def _on_alias_tree_select(_e=None) -> None:
+      self._load_selected_alias_into_form()
+      self._sync_alias_update_selected_state()
+
+    self.alias_tree.bind("<<TreeviewSelect>>", _on_alias_tree_select)
+
 
   # -----------------------------------------------------------------------------
   # Project bar callbacks
@@ -2509,6 +2547,12 @@ class InventoryApp(ctk.CTk):
         b.configure(state=state_btn)
       except Exception:
         pass
+
+    # Keep "Update Selected" buttons disabled unless exactly one row is selected.
+    try:
+      self._sync_update_selected_buttons_state()
+    except Exception:
+      pass
 
   # -----------------------------------------------------------------------------
   # Alias UI syncing (Transactions form dropdown)
@@ -2640,6 +2684,12 @@ class InventoryApp(ctk.CTk):
       values = (f"{pad_l}{sku}", f"{pad_l}{name}")
       tag = "even" if (i % 2) == 0 else "odd"
       self.alias_tree.insert("", "end", iid=sku, values=values, tags=(tag,))
+
+    # Keep "Update Selected" disabled unless exactly one row is selected.
+    try:
+      self._sync_alias_update_selected_state()
+    except Exception:
+      pass
 
   def _get_selected_alias_skus(self) -> List[str]:
     """
@@ -3040,6 +3090,12 @@ class InventoryApp(ctk.CTk):
 
       self.tx_tree.insert("", "end", iid=str(r["id"]), values=values, tags=(tag,))
 
+    # Keep "Update Selected" disabled unless exactly one row is selected.
+    try:
+      self._sync_tx_update_selected_state()
+    except Exception:
+      pass
+
   # ---------------------------------------------------------------------------
   # Overview view (Inventory vs Monthly)
   # ---------------------------------------------------------------------------
@@ -3341,7 +3397,40 @@ class InventoryApp(ctk.CTk):
   # Selection Helpers
   # -----------------------------------------------------------------------------
 
+  def _set_ctk_button_enabled(self, btn: Any, enabled: bool) -> None:
+    """Enable/disable a CTkButton-like widget (best-effort)."""
+    if btn is None:
+      return
+    try:
+      btn.configure(state=("normal" if enabled else "disabled"))
+    except Exception:
+      pass
+
+  def _sync_tx_update_selected_state(self) -> None:
+    """Disable Transactions 'Update Selected' unless exactly one row is selected."""
+    try:
+      has_project = bool(self.project_data_path)
+      sel_count = len(self._get_selected_tx_ids())
+      self._set_ctk_button_enabled(getattr(self, "btn_update", None), bool(has_project and sel_count == 1))
+    except Exception:
+      pass
+
+  def _sync_alias_update_selected_state(self) -> None:
+    """Disable Aliases 'Update Selected' unless exactly one row is selected."""
+    try:
+      has_project = bool(self.project_data_path)
+      sel_count = len(self._get_selected_alias_skus())
+      self._set_ctk_button_enabled(getattr(self, "btn_alias_update", None), bool(has_project and sel_count == 1))
+    except Exception:
+      pass
+
+  def _sync_update_selected_buttons_state(self) -> None:
+    """Sync all 'Update Selected' button states across views (best-effort)."""
+    self._sync_tx_update_selected_state()
+    self._sync_alias_update_selected_state()
+
   def _get_selected_tx_id(self) -> Optional[int]:
+
     """
     Get the "primary" selected transaction ID.
     Keeps legacy single-select call sites working.
