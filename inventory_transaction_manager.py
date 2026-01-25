@@ -1158,8 +1158,12 @@ class InventoryApp(ctk.CTk):
     self._alias_dropdown.place_forget()
     self._alias_dropdown_visible = False
 
-    self._alias_dropdown_scroll = ctk.CTkScrollableFrame(self._alias_dropdown, width=280, height=220)
+    # Height is set dynamically on each open/refresh based on available space + content size.
+    self._alias_dropdown_scroll = ctk.CTkScrollableFrame(self._alias_dropdown, width=512, height=10)
     self._alias_dropdown_scroll.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+    # Runtime sizing cache
+    self._alias_dropdown_content_px = 80
 
     _alias_filter_state = {"after_id": None}
 
@@ -1206,7 +1210,7 @@ class InventoryApp(ctk.CTk):
         # Width matches the picker (entry + button)
         w_drop = int(self.alias_picker.winfo_width() or 0)
         if w_drop <= 10:
-          w_drop = 280
+          w_drop = 512
 
         try:
           self._alias_dropdown.configure(width=w_drop)
@@ -1231,6 +1235,8 @@ class InventoryApp(ctk.CTk):
 
       shown = [v for v in values if v]  # ignore blank sentinel for UI
       if not shown:
+        # Content wants to be small when empty.
+        self._alias_dropdown_content_px = 64
         ctk.CTkLabel(self._alias_dropdown_scroll, text="No matches").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         return
 
