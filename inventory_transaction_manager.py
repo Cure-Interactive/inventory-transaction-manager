@@ -37,6 +37,58 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+# =============================================================================
+# Tooltips (best-effort; optional dependency)
+# =============================================================================
+
+try:
+  from CTkToolTip import CTkToolTip  # type: ignore
+except Exception:
+  CTkToolTip = None  # type: ignore
+
+
+def tooltip(*widgets: Any, text: str) -> None:
+  """Attach (or update) the same tooltip on one or more Tk/CTk widgets.
+
+  Behavior:
+  - If CTkToolTip is not installed, this is a no-op.
+  - Tooltips are cached on each widget as `_cure_tooltip`.
+  - If a widget already has a tooltip, we best-effort close/destroy it first.
+
+  Args:
+    *widgets: One or more tkinter/customtkinter widgets.
+    text: Tooltip text to show.
+  """
+  if CTkToolTip is None:
+    return
+
+  for w in widgets:
+    if w is None:
+      continue
+
+    # Best-effort: remove old tooltip instance if we've attached one before.
+    old = getattr(w, "_cure_tooltip", None)
+    if old is not None:
+      try:
+        if hasattr(old, "hide"):
+          old.hide()
+      except Exception:
+        pass
+      try:
+        if hasattr(old, "destroy"):
+          old.destroy()
+      except Exception:
+        pass
+
+    try:
+      w._cure_tooltip = CTkToolTip(w, message=str(text))  # type: ignore[attr-defined]
+    except Exception:
+      # Last resort: never let tooltips break the UI.
+      try:
+        w._cure_tooltip = None  # type: ignore[attr-defined]
+      except Exception:
+        pass
+
 
 # =============================================================================
 # Window Icon (title bar / taskbar best-effort)
@@ -651,7 +703,347 @@ class InventoryApp(ctk.CTk):
   # UI Construction
   # -----------------------------------------------------------------------------
 
+  # =============================================================================
+  # Tooltips
+  # =============================================================================
+
+
+  def _install_tab_button_tooltips(self) -> None:
+    """Attach tooltips to CTkTabview tab buttons (segmented button)."""
+    try:
+      tabview = getattr(self, "tabs", None)
+      if tabview is None:
+        return
+
+      seg = getattr(tabview, "_segmented_button", None)
+      if seg is None:
+        return
+
+      btn_map = None
+      for attr in ("_buttons_dict", "_buttons", "buttons"):
+        v = getattr(seg, attr, None)
+        if isinstance(v, dict):
+          btn_map = v
+          break
+
+      if not isinstance(btn_map, dict):
+        return
+
+      tip_by_tab = {
+        "Transactions": "Transactions: add/update/delete purchases & sales. This drives costing and the overview.",
+        "Overview": "Overview: current inventory state (on-hand qty, WAC, totals) and optional summaries.",
+        "Aliases": "Aliases: map friendly names to SKUs. Used in dropdowns and tables.",
+      }
+
+      for tab_name, tip in tip_by_tab.items():
+        btn = btn_map.get(tab_name)
+        if btn is not None:
+          tooltip(btn, text=tip)
+    except Exception:
+      pass
+
+
+  def _install_tooltips_explicit(self) -> None:
+    """Attach curated tooltips to key UI widgets we store on `self`.
+
+    Also ensures labels get the same tooltip as their associated value widgets.
+    """
+    def _attach(w: Any, msg: str) -> None:
+      if w is None:
+        return
+      try:
+        tooltip(w, text=msg)
+      except Exception:
+        pass
+
+      # If this widget has an associated label, apply the SAME tooltip to the label too.
+      try:
+        lbl = self._tooltip_associated_label_widget(w)
+        if lbl is not None:
+          tooltip(lbl, text=msg)
+      except Exception:
+        pass
+
+    try:
+      _attach(self.tabs, "Tabs: switch between Transactions, Overview, and Aliases.")
+    except Exception:
+      pass
+
+    try:
+      self._install_tab_button_tooltips()
+    except Exception:
+      pass
+
+    # Project bar (label + combo + buttons)
+    _attach(getattr(self, "project_combo", None),
+            "Project Directory: choose or type a project folder. Data saves to <ProjectDir>/inventory_data.json.")
+
+    _attach(getattr(self, "btn_browse_project", None),
+            "Browse: pick a project folder. Data file is created/used at <ProjectDir>/inventory_data.json.")
+
+    _attach(getattr(self, "btn_load_project", None),
+            "Load/Refresh: load the selected project folder and refresh all tables from <ProjectDir>/inventory_data.json.")
+
+    _attach(getattr(self, "btn_clear_history", None),
+            "Clear History: remove recent project folders from the dropdown (does NOT delete any project data files).")
+
+    # Transactions form (labels will inherit via _attach)
+    for w, msg in [
+      (getattr(self, "entry_date", None), "Date: transaction date (YYYY-MM-DD or M/D/YYYY)."),
+      (getattr(self, "entry_sku", None), "SKU: item identifier used for costing/aggregation."),
+      (getattr(self, "lbl_tx_alias", None), "Alias: type to filter by alias name OR SKU; selecting an alias sets the SKU field."),
+      (getattr(self, "entry_alias", None), "Alias: type to filter by alias name OR SKU; selecting an alias sets the SKU field."),
+      (getattr(self, "btn_alias_drop", None), "Alias dropdown: show all aliases; typing filters by alias name OR SKU."),
+
+      (getattr(self, "opt_type", None), "Type: Purchase increases inventory; Sale reduces inventory."),
+      (getattr(self, "entry_qty", None), "Qty: number of units bought/sold."),
+      (getattr(self, "entry_unit_price", None), "Unit Price: purchase cost per unit (for Purchase) or sale price per unit (for Sale)."),
+      (getattr(self, "entry_note", None), "Note: optional text for receipts, customer, order, etc."),
+      (getattr(self, "btn_add", None), "Add: append a new transaction row."),
+      (getattr(self, "btn_update", None), "Update: modify the selected transaction row."),
+      (getattr(self, "btn_delete", None), "Delete: remove the selected transaction row."),
+      (getattr(self, "btn_export", None), "Export: write transactions to a CSV file for sharing/backup."),
+      (getattr(self, "tx_tree", None), "Transactions table: hover cells for exact values; click rows to select."),
+    ]:
+      _attach(w, msg)
+
+    # Overview tab
+    for w, msg in [
+      (getattr(self, "opt_ov_view", None), "Overview mode: choose summary view/grouping."),
+      (getattr(self, "ov_tree", None), "Overview table: current on-hand, WAC, and totals per SKU/alias."),
+      (getattr(self, "btn_ov_export", None), "Export Overview: save the current overview table."),
+    ]:
+      _attach(w, msg)
+
+    # Aliases tab
+    for w, msg in [
+      (getattr(self, "entry_alias_name", None), "Alias Name: friendly display name (e.g., 'NES Controller')."),
+      (getattr(self, "entry_alias_sku", None), "Alias SKU: the SKU value this alias maps to."),
+      (getattr(self, "btn_alias_add", None), "Add Alias: create a new alias mapping."),
+      (getattr(self, "btn_alias_update", None), "Update Alias: update the selected alias mapping."),
+      (getattr(self, "btn_alias_delete", None), "Delete Alias: remove the selected alias mapping."),
+      (getattr(self, "alias_tree", None), "Aliases table: select an alias to edit or delete."),
+    ]:
+      _attach(w, msg)
+
+
+  def _tooltip_associated_label_widget(self, w: Any) -> Any:
+    """Find the likely label widget associated with a widget by examining grid siblings.
+
+    This targets the common pattern:
+      Label @ (row=r, col=0) + Widget @ (row=r, col=1)
+
+    Returns:
+      The label widget if found; otherwise None.
+    """
+    try:
+      info = w.grid_info() or {}
+    except Exception:
+      return None
+
+    try:
+      row = int(info.get("row"))
+      col = int(info.get("column"))
+    except Exception:
+      return None
+
+    parent = getattr(w, "master", None)
+    if parent is None:
+      return None
+
+    candidate_cols = [max(col - 1, 0), 0]
+
+    try:
+      siblings = parent.winfo_children()
+    except Exception:
+      return None
+
+    for ccol in candidate_cols:
+      for sib in siblings:
+        if sib is w:
+          continue
+        try:
+          sinfo = sib.grid_info() or {}
+          srow = int(sinfo.get("row"))
+          scol = int(sinfo.get("column"))
+        except Exception:
+          continue
+        if srow != row or scol != ccol:
+          continue
+
+        try:
+          cls = sib.__class__.__name__
+        except Exception:
+          cls = ""
+        if "Label" not in cls:
+          continue
+
+        try:
+          t = str(sib.cget("text") or "").strip()
+        except Exception:
+          t = ""
+        if t:
+          return sib
+
+    return None
+
+
+  def _tooltip_associated_label_text(self, w: Any) -> str:
+    """Try to infer a label text for a widget by examining its grid siblings."""
+    lbl = self._tooltip_associated_label_widget(w)
+    if lbl is None:
+      return ""
+    try:
+      return str(lbl.cget("text") or "").strip()
+    except Exception:
+      return ""
+
+
+  def _tooltip_text_for_widget(self, w: Any) -> str:
+    """Infer a human-friendly tooltip string for a widget.
+
+    Rules:
+    - Only attach tooltips to interactive or informative widgets.
+    - NEVER attach tooltips to container widgets (frames), or fall back to class names.
+    - Labels do not get auto-tooltips; they inherit tooltips from their paired value widgets.
+    """
+    if w is None:
+      return ""
+
+    try:
+      cls = w.__class__.__name__
+    except Exception:
+      cls = ""
+
+    # -------------------------------------------------------------------------
+    # Skip non-interactive containers / structural widgets
+    # -------------------------------------------------------------------------
+    # NOTE: This prevents "CTkFrame" and similar nonsense tooltips.
+    skip_class_fragments = (
+      "Frame",
+      "Canvas",
+      "Separator",
+      "Scrollbar",
+      "Toplevel",
+    )
+    if any(frag in cls for frag in skip_class_fragments):
+      return ""
+
+    # Labels: only get tooltips when mirrored from their value widgets.
+    if "Label" in cls:
+      return ""
+
+    # -------------------------------------------------------------------------
+    # Explicit widget text (buttons, tab buttons, etc.)
+    # -------------------------------------------------------------------------
+    for key in ("text", "placeholder_text"):
+      try:
+        t = str(w.cget(key) or "").strip()
+      except Exception:
+        t = ""
+      if t:
+        return t
+
+    # -------------------------------------------------------------------------
+    # Special-case: ttk.Treeview
+    # -------------------------------------------------------------------------
+    try:
+      import tkinter.ttk as _ttk  # local import to avoid global cycles
+      if isinstance(w, _ttk.Treeview):
+        return "Table: hover headers for help; hover cells for exact values."
+    except Exception:
+      pass
+
+    # -------------------------------------------------------------------------
+    # Infer from sibling label (entries, comboboxes, option menus, etc.)
+    # -------------------------------------------------------------------------
+    label = self._tooltip_associated_label_text(w)
+    if label:
+      if "Entry" in cls:
+        return f"Set {label}"
+      if "ComboBox" in cls or "OptionMenu" in cls:
+        return f"Select {label}"
+      if "Slider" in cls:
+        return f"Adjust {label}"
+      if "Switch" in cls or "CheckBox" in cls or "RadioButton" in cls:
+        return f"Toggle {label}"
+      return label
+
+    # No fallback. If we can’t infer something useful, skip tooltip entirely.
+    return ""
+
+
+  def _install_tooltips_recursive(self, root: Any) -> None:
+    """Attach tooltips to every widget in the subtree rooted at `root`.
+
+    Notes:
+    - Best-effort and never throws.
+    - Tooltips are only attached once per widget (`_cure_tooltip` guard).
+    - IMPORTANT: never attach a tooltip to the app root window (`self`) because CTkToolTip can
+      surface that tooltip while hovering child widgets (shows as "InventoryApp" over everything).
+    """
+    if CTkToolTip is None:
+      return
+
+    stack = [root]
+    while stack:
+      w = stack.pop()
+
+      # Never tooltip the app/root window.
+      if w is self:
+        # If an old root tooltip exists (from a previous run), remove it.
+        old = getattr(w, "_cure_tooltip", None)
+        if old is not None:
+          try:
+            if hasattr(old, "hide"):
+              old.hide()
+          except Exception:
+            pass
+          try:
+            if hasattr(old, "destroy"):
+              old.destroy()
+          except Exception:
+            pass
+          try:
+            w._cure_tooltip = None  # type: ignore[attr-defined]
+          except Exception:
+            pass
+
+        # Still recurse into children.
+        try:
+          stack.extend(list(w.winfo_children()))
+        except Exception:
+          pass
+        continue
+
+      # Skip if we've already attached a tooltip here.
+      if getattr(w, "_cure_tooltip", None) is None:
+        try:
+          msg = self._tooltip_text_for_widget(w)
+          if msg:
+            tooltip(w, text=msg)
+
+            # Mirror value widget tooltip to its label (labels do not get auto-tooltips)
+            try:
+              cls = w.__class__.__name__
+            except Exception:
+              cls = ""
+
+            if any(k in cls for k in ("Entry", "ComboBox", "OptionMenu", "Slider", "Switch", "CheckBox", "RadioButton")):
+              lbl = self._tooltip_associated_label_widget(w)
+              if lbl is not None:
+                tooltip(lbl, text=msg)
+        except Exception:
+          pass
+
+      try:
+        stack.extend(list(w.winfo_children()))
+      except Exception:
+        pass
+
+
   def _build_ui(self) -> None:
+
     self.grid_rowconfigure(1, weight=1)
     self.grid_columnconfigure(0, weight=1)
 
@@ -660,7 +1052,8 @@ class InventoryApp(ctk.CTk):
     project_bar.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
     project_bar.grid_columnconfigure(1, weight=1)
 
-    ctk.CTkLabel(project_bar, text="Project Directory:").grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
+    self.lbl_project_dir = ctk.CTkLabel(project_bar, text="Project Directory:")
+    self.lbl_project_dir.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
 
     self.project_dir_var = tk.StringVar(value=(self.recent_project_dirs[0] if self.recent_project_dirs else ""))
     self.project_combo = ctk.CTkComboBox(
@@ -672,9 +1065,14 @@ class InventoryApp(ctk.CTk):
     )
     self.project_combo.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
 
-    ctk.CTkButton(project_bar, text="Browse…", width=110, command=self._on_browse_project).grid(row=0, column=2, padx=6, pady=10)
-    ctk.CTkButton(project_bar, text="Load/Refresh", width=130, command=self._on_load_project).grid(row=0, column=3, padx=6, pady=10)
-    ctk.CTkButton(project_bar, text="Clear History", width=120, command=self._on_clear_history).grid(row=0, column=4, padx=(6, 10), pady=10)
+    self.btn_browse_project = ctk.CTkButton(project_bar, text="Browse…", width=110, command=self._on_browse_project)
+    self.btn_browse_project.grid(row=0, column=2, padx=6, pady=10)
+
+    self.btn_load_project = ctk.CTkButton(project_bar, text="Load/Refresh", width=130, command=self._on_load_project)
+    self.btn_load_project.grid(row=0, column=3, padx=6, pady=10)
+
+    self.btn_clear_history = ctk.CTkButton(project_bar, text="Clear History", width=120, command=self._on_clear_history)
+    self.btn_clear_history.grid(row=0, column=4, padx=(6, 10), pady=10)
 
     # Tabs
     self.tabs = ctk.CTkTabview(self)
@@ -687,6 +1085,11 @@ class InventoryApp(ctk.CTk):
     self._build_transactions_tab()
     self._build_overview_tab()
     self._build_aliases_tab()
+    # Tooltips (best-effort): attach curated tips first, then fill in the rest.
+    self._install_tooltips_explicit()
+    # IMPORTANT: Do NOT recurse from the app root; it creates a root-level tooltip ("InventoryApp")
+    # that can appear over child widgets. Recurse from the tab container instead.
+    self._install_tooltips_recursive(self.tabs)
 
   def _build_transactions_tab(self) -> None:
     # Row 0: inputs. Row 1: note + action buttons. Row 2: table.
@@ -733,16 +1136,254 @@ class InventoryApp(ctk.CTk):
     self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=200)
     self.entry_sku.grid(row=0, column=3, padx=6, pady=10)
 
-    ctk.CTkLabel(form_row, text="Alias").grid(row=0, column=4, padx=(14, 6), pady=10)
-    self.alias_combo = ctk.CTkOptionMenu(
-      form_row,
-      variable=self.var_alias_choice,
-      values=[""],  # CTkOptionMenu needs at least 1 value
-      width=260,
-      command=lambda _choice: self._on_alias_selected_in_tx_form(),
-    )
+    self.lbl_tx_alias = ctk.CTkLabel(form_row, text="Alias")
+    self.lbl_tx_alias.grid(row=0, column=4, padx=(14, 6), pady=10)
 
-    self.alias_combo.grid(row=0, column=5, padx=6, pady=10)
+    # Alias picker (Entry + non-focus-stealing suggestion overlay)
+    self.alias_picker = ctk.CTkFrame(form_row, fg_color="transparent")
+    self.alias_picker.grid(row=0, column=5, padx=6, pady=10, sticky="w")
+    self.alias_picker.grid_columnconfigure(0, weight=1)
+
+    self.entry_alias = ctk.CTkEntry(self.alias_picker, textvariable=self.var_alias_choice, width=226)
+    self.entry_alias.grid(row=0, column=0, sticky="ew")
+
+    self.btn_alias_drop = ctk.CTkButton(self.alias_picker, text="▾", width=32)
+    self.btn_alias_drop.grid(row=0, column=1, padx=(6, 0))
+
+    # Cache of all alias display values (rebuilt by _refresh_alias_dropdown)
+    self._alias_dropdown_values = [""] + self._build_alias_display_values()
+
+    # Overlay dropdown (IMPORTANT: parent is the Transactions tab so it can overlay tab contents)
+    self._alias_dropdown = ctk.CTkFrame(self.tab_tx, corner_radius=10, border_width=1)
+    self._alias_dropdown.place_forget()
+    self._alias_dropdown_visible = False
+
+    self._alias_dropdown_scroll = ctk.CTkScrollableFrame(self._alias_dropdown, width=280, height=220)
+    self._alias_dropdown_scroll.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+    _alias_filter_state = {"after_id": None}
+
+    def _alias_is_descendant(widget: Any, parent: Any) -> bool:
+      try:
+        w = widget
+        while w is not None:
+          if w == parent:
+            return True
+          w = getattr(w, "master", None)
+      except Exception:
+        pass
+      return False
+
+    def _alias_dropdown_hide() -> None:
+      if not getattr(self, "_alias_dropdown_visible", False):
+        return
+      try:
+        self._alias_dropdown.place_forget()
+      except Exception:
+        pass
+      self._alias_dropdown_visible = False
+
+    def _alias_dropdown_place_below_entry() -> None:
+      """
+      Place dropdown directly under the alias entry, relative to the Transactions tab.
+      This ensures the dropdown overlays tab contents (no "hidden under row" gap).
+      """
+      try:
+        self.update_idletasks()
+
+        # Screen coords (absolute)
+        ex = int(self.entry_alias.winfo_rootx())
+        ey = int(self.entry_alias.winfo_rooty())
+        eh = int(self.entry_alias.winfo_height())
+
+        # Convert to coords relative to the Transactions tab (self.tab_tx)
+        tx = int(self.tab_tx.winfo_rootx())
+        ty = int(self.tab_tx.winfo_rooty())
+
+        x = ex - tx
+        y = (ey - ty) + eh
+
+        # Width matches the picker (entry + button)
+        w_drop = int(self.alias_picker.winfo_width() or 0)
+        if w_drop <= 10:
+          w_drop = 280
+
+        try:
+          self._alias_dropdown.configure(width=w_drop)
+        except Exception:
+          pass
+
+        # Tiny seam tweak (optional)
+        y = max(0, y - 1)
+
+        self._alias_dropdown.place(x=x, y=y)
+        self._alias_dropdown.lift()  # now lifts above all tab content siblings
+        self._alias_dropdown_visible = True
+      except Exception:
+        _alias_dropdown_hide()
+
+    def _alias_dropdown_render(values: List[str]) -> None:
+      try:
+        for child in self._alias_dropdown_scroll.winfo_children():
+          child.destroy()
+      except Exception:
+        pass
+
+      shown = [v for v in values if v]  # ignore blank sentinel for UI
+      if not shown:
+        ctk.CTkLabel(self._alias_dropdown_scroll, text="No matches").grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        return
+
+      # Limit rendered rows for performance; scroll holds the rest if needed later.
+      MAX_ROWS = 80
+      shown = shown[:MAX_ROWS]
+
+      def _pick(val: str) -> None:
+        try:
+          self.var_alias_choice.set(val)
+        except Exception:
+          pass
+
+        _alias_dropdown_hide()
+
+        # Commit selection behavior (sets SKU) but DO NOT move focus away.
+        self._on_alias_selected_in_tx_form()
+
+        # Put caret back in alias entry
+        try:
+          self.entry_alias.focus_set()
+          # no icursor call
+
+        except Exception:
+          pass
+
+      for i, v in enumerate(shown):
+        btn = ctk.CTkButton(
+          self._alias_dropdown_scroll,
+          text=v,
+          anchor="w",
+          height=26,
+          fg_color="transparent",
+          hover=True,
+          command=lambda vv=v: _pick(vv),
+        )
+        btn.grid(row=i, column=0, sticky="ew", padx=2, pady=1)
+
+      try:
+        self._alias_dropdown_scroll.grid_columnconfigure(0, weight=1)
+      except Exception:
+        pass
+
+    def _alias_apply_filter(show_if_any: bool = True) -> None:
+      raw_in = (self.var_alias_choice.get() or "")
+      q = raw_in.strip()
+
+      all_values = list(getattr(self, "_alias_dropdown_values", None) or ([""] + self._build_alias_display_values()))
+      only = [v for v in all_values if v]
+
+      def _norm(s: str) -> str:
+        # Lower, remove most punctuation, collapse whitespace.
+        s2 = re.sub(r"[^a-zA-Z0-9]+", " ", str(s or "").lower())
+        return re.sub(r"\s+", " ", s2).strip()
+
+      qn = _norm(q)
+
+      # EMPTY SEARCH => show ALL aliases
+      if not qn:
+        filtered = only
+      else:
+        q_tokens = [t for t in qn.split(" ") if t]
+
+        filtered = []
+        for disp in only:
+          sku, name = self._parse_alias_display_value(disp)
+
+          # Search space includes BOTH: alias name + sku
+          hay = _norm(f"{name} {sku}")
+
+          # All tokens must be present (order-independent)
+          if all(t in hay for t in q_tokens):
+            filtered.append(disp)
+
+      _alias_dropdown_render(filtered)
+
+      if show_if_any and (qn or filtered):
+        _alias_dropdown_place_below_entry()
+        # Do NOT touch focus/caret here — it breaks cursor position while typing/refocusing.
+      else:
+        _alias_dropdown_hide()
+
+    def _alias_apply_filter_debounced(_event=None) -> None:
+      if _alias_filter_state["after_id"] is not None:
+        try:
+          self.after_cancel(_alias_filter_state["after_id"])
+        except Exception:
+          pass
+        _alias_filter_state["after_id"] = None
+
+      _alias_filter_state["after_id"] = self.after(60, _alias_apply_filter)
+
+    def _alias_toggle_dropdown() -> None:
+      if getattr(self, "_alias_dropdown_visible", False):
+        _alias_dropdown_hide()
+      else:
+        # show full list
+        _alias_dropdown_render([v for v in (getattr(self, "_alias_dropdown_values", []) or []) if v])
+        _alias_dropdown_place_below_entry()
+        # Do NOT touch focus/caret here.
+
+    self.btn_alias_drop.configure(command=_alias_toggle_dropdown)
+
+    # Typing: filter and keep dropdown visible (without stealing focus)
+    self.entry_alias.bind("<KeyRelease>", _alias_apply_filter_debounced)
+
+    # Clicking into the Alias entry should open the dropdown (show all if empty, filtered if not).
+    def _alias_open_on_click(_e=None) -> None:
+      # Let the click set caret first, then place/render dropdown.
+      try:
+        self.after(1, lambda: _alias_apply_filter(show_if_any=True))
+      except Exception:
+        pass
+
+    # Focus-in (tabbing into the field) should also open it.
+    def _alias_open_on_focus(_e=None) -> None:
+      try:
+        if not getattr(self, "_alias_dropdown_visible", False):
+          self.after(1, lambda: _alias_apply_filter(show_if_any=True))
+      except Exception:
+        pass
+
+    self.entry_alias.bind("<Button-1>", _alias_open_on_click)
+    self.entry_alias.bind("<FocusIn>", _alias_open_on_focus)
+
+    # Esc closes dropdown
+    self.entry_alias.bind("<Escape>", lambda _e: _alias_dropdown_hide())
+
+    # Clicking outside closes dropdown (additive bind so we don’t break other handlers)
+    if not getattr(self, "_alias_outside_click_bound", False):
+      self._alias_outside_click_bound = True
+
+      def _on_any_click_close_alias(e) -> None:
+        try:
+          w = e.widget
+
+          # Treat clicks anywhere inside the alias picker (entry + button) as "inside".
+          # CTk widgets often emit events from internal child widgets, not the outer widget.
+          if _alias_is_descendant(w, self.alias_picker):
+            return
+
+          # Treat clicks inside the dropdown as "inside".
+          if _alias_is_descendant(w, self._alias_dropdown):
+            return
+
+          _alias_dropdown_hide()
+        except Exception:
+          pass
+
+      self.bind_all("<Button-1>", _on_any_click_close_alias, add="+")
+
+    # Let _refresh_alias_dropdown update + hide if needed
+    self._alias_dropdown_hide = _alias_dropdown_hide
 
     ctk.CTkLabel(form_row, text="Type").grid(row=0, column=6, padx=(14, 6), pady=10)
     self.opt_type = ctk.CTkOptionMenu(
@@ -1066,7 +1707,60 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
+    header_tooltips = {
+      "id": "ID: internal transaction row id.",
+      "date": "Date: transaction date (sorted ascending for costing).",
+      "sku": "SKU: item identifier used for costing/aggregation.",
+      "alias": "Alias: friendly name for the SKU (from Aliases tab).",
+      "type": "Type: PURCHASE adds inventory; SALE removes inventory.",
+      "qty": "Qty: units bought/sold.",
+      "purchase_unit_cost": "Purchase Unit Cost: per-unit cost on PURCHASE rows.",
+      "sale_unit_price": "Sale Unit Price: per-unit sale price on SALE rows.",
+      "purchase_total_cost": "Purchase Total Cost: Qty × Purchase Unit Cost.",
+      "prev_avg_cost": "Prev Avg Cost: weighted average cost before this transaction.",
+      "onhand_qty": "OnHand Qty: inventory quantity after this transaction.",
+      "avg_cost_after": "Avg Cost: weighted average cost after this transaction.",
+      "cogs": "COGS: Qty × Prev Avg Cost (for SALE rows).",
+      "onhand_cost": "OnHand Cost: total cost value of inventory after this transaction.",
+      "sales_rev": "Sales Rev: Qty × Sale Unit Price (for SALE rows).",
+      "gross_profit": "Gross Profit: Sales Rev − COGS (for SALE rows).",
+      "note": "Note: free text note for receipts/orders/etc.",
+    }
+
     def _tree_on_hover(event) -> None:
+      region = self.tx_tree.identify_region(event.x, event.y)
+
+      # Header hover tooltip
+      if region == "heading":
+        col = self.tx_tree.identify_column(event.x)
+        if not col or col == "#0":
+          _tree_tip_hide()
+          return
+
+        cols = list(self.tx_tree["columns"])
+        try:
+          idx = int(col[1:]) - 1
+        except Exception:
+          _tree_tip_hide()
+          return
+        if idx < 0 or idx >= len(cols):
+          _tree_tip_hide()
+          return
+
+        col_id = cols[idx]
+        text = str(header_tooltips.get(col_id) or headings.get(col_id) or col_id).strip()
+
+        key = ("__heading__", col_id, text)
+        if _tree_tip_state["last"] != key:
+          _tree_tip_state["last"] = key
+        _tree_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+        return
+
+      # Cell hover tooltip (existing behavior)
+      if region != "cell":
+        _tree_tip_hide()
+        return
+
       iid = self.tx_tree.identify_row(event.y)
       col = self.tx_tree.identify_column(event.x)
       if not iid or not col or col == "#0":
@@ -1356,9 +2050,70 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
+    header_tooltips = {
+      # Inventory mode
+      "sku": "SKU: item identifier.",
+      "alias": "Alias: friendly name for SKU (from Aliases tab).",
+      "onhand_qty": "OnHand Qty: current inventory quantity.",
+      "avg_cost": "Avg Cost: weighted average cost per unit (current).",
+      "onhand_cost": "OnHand Cost: total inventory value (Qty × Avg Cost).",
+      "last_tx_date": "Last Tx Date: most recent transaction date for this SKU.",
+      "last_sale_price": "Last Sale Price: most recent sale unit price for this SKU.",
+      "status": "Status: IN STOCK / OUT / NEGATIVE (OVERSOLD).",
+
+      # Monthly mode
+      "month": "Month bucket (YYYY-MM).",
+      "month_date": "Month Date (YYYY-MM-01).",
+      "purchase_cost": "Purchase Cost: sum of purchase totals in the month.",
+      "sales_amount": "Sales Amount: sum of sales revenue in the month.",
+      "cogs": "COGS: sum of cost-of-goods-sold in the month.",
+    }
+
     def _tree_on_hover(event) -> None:
+      region = self.ov_tree.identify_region(event.x, event.y)
+
+      # Header hover tooltip
+      if region == "heading":
+        col = self.ov_tree.identify_column(event.x)
+        if not col or col == "#0":
+          _tree_tip_hide()
+          return
+
+        cols = list(self.ov_tree["columns"])
+        try:
+          idx = int(col[1:]) - 1
+        except Exception:
+          _tree_tip_hide()
+          return
+
+        if idx < 0 or idx >= len(cols):
+          _tree_tip_hide()
+          return
+
+        col_id = cols[idx]
+
+        # Prefer our map, else fall back to the displayed heading text (strip gutter).
+        text = header_tooltips.get(col_id)
+        if not text:
+          try:
+            text = str(self.ov_tree.heading(col_id, "text") or "").strip()
+          except Exception:
+            text = col_id
+          text = text.strip()
+
+        key = ("__heading__", col_id, text)
+        if _tree_tip_state["last"] != key:
+          _tree_tip_state["last"] = key
+        _tree_tip_show(text=str(text), x_root=event.x_root, y_root=event.y_root)
+        return
+
+      # Cell hover tooltip (existing behavior)
+      if region != "cell":
+        _tree_tip_hide()
+        return
+
       iid = self.ov_tree.identify_row(event.y)
-      col = self.ov_tree.identify_column(event.x)  # "#1", "#2", ...
+      col = self.ov_tree.identify_column(event.x)
       if not iid or not col or col == "#0":
         _tree_tip_hide()
         return
@@ -1481,6 +2236,118 @@ class InventoryApp(ctk.CTk):
     self.alias_tree.column("sku", width=240, minwidth=80, anchor="w", stretch=False)
     self.alias_tree.column("name", width=520, minwidth=120, anchor="w", stretch=True)
 
+    # ---------------------------------------------------------
+    # Header hover tooltip (Aliases table)
+    # ---------------------------------------------------------
+
+    _alias_tip_state = {"win": None, "lbl": None, "font": None, "last": None}
+
+    def _alias_tip_hide() -> None:
+      win = _alias_tip_state.get("win")
+      if win is not None:
+        try:
+          win.destroy()
+        except Exception:
+          pass
+      _alias_tip_state["win"] = None
+      _alias_tip_state["lbl"] = None
+      _alias_tip_state["last"] = None
+
+    def _alias_tip_show(*, text: str, x_root: int, y_root: int) -> None:
+      if _alias_tip_state["win"] is None:
+        win = tk.Toplevel(self)
+        win.withdraw()
+        win.overrideredirect(True)
+        try:
+          win.attributes("-topmost", True)
+        except Exception:
+          pass
+
+        bg = _ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"])
+        fg = _ctk_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+
+        from tkinter import font as tkfont
+        if _alias_tip_state["font"] is None:
+          f = tkfont.nametofont("TkDefaultFont").copy()
+          try:
+            f.configure(size=int(f.cget("size")) + 4)
+          except Exception:
+            f.configure(size=14)
+          _alias_tip_state["font"] = f
+
+        lbl = tk.Label(
+          win,
+          text="",
+          justify="left",
+          anchor="w",
+          padx=8,
+          pady=4,
+          bg=bg,
+          fg=fg,
+          font=_alias_tip_state["font"],
+          bd=1,
+          relief="solid",
+        )
+        lbl.pack()
+        _alias_tip_state["win"] = win
+        _alias_tip_state["lbl"] = lbl
+
+      win = _alias_tip_state["win"]
+      lbl = _alias_tip_state["lbl"]
+      if win is None or lbl is None:
+        return
+
+      lbl.configure(text=text)
+      x = x_root + 14
+      y = y_root + 16
+      try:
+        win.geometry(f"+{x}+{y}")
+        win.deiconify()
+      except Exception:
+        pass
+
+    _alias_header_tooltips = {
+      "sku": "SKU: the inventory identifier this alias maps to.",
+      "name": "Name: friendly display name shown in tables and dropdowns.",
+    }
+
+    def _alias_on_hover(event) -> None:
+      region = self.alias_tree.identify_region(event.x, event.y)
+      if region != "heading":
+        _alias_tip_hide()
+        return
+
+      col = self.alias_tree.identify_column(event.x)
+      if not col or col == "#0":
+        _alias_tip_hide()
+        return
+
+      cols = list(self.alias_tree["columns"])
+      try:
+        idx = int(col[1:]) - 1
+      except Exception:
+        _alias_tip_hide()
+        return
+
+      if idx < 0 or idx >= len(cols):
+        _alias_tip_hide()
+        return
+
+      col_id = cols[idx]
+      text = str(_alias_header_tooltips.get(col_id) or col_id)
+
+      key = ("__heading__", col_id, text)
+      if _alias_tip_state["last"] != key:
+        _alias_tip_state["last"] = key
+      _alias_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+
+    self.alias_tree.bind("<Motion>", _alias_on_hover)
+    self.alias_tree.bind("<Leave>", lambda _e: _alias_tip_hide())
+    self.alias_tree.bind("<ButtonPress>", lambda _e: _alias_tip_hide())
+    self.alias_tree.bind("<MouseWheel>", lambda _e: _alias_tip_hide())
+    self.alias_tree.bind("<Button-4>", lambda _e: _alias_tip_hide())
+    self.alias_tree.bind("<Button-5>", lambda _e: _alias_tip_hide())
+
     self.alias_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected_alias_into_form())
 
   # -----------------------------------------------------------------------------
@@ -1535,12 +2402,19 @@ class InventoryApp(ctk.CTk):
       except Exception:
         pass
 
-    # Alias dropdown (hard dropdown: no typing)
-    for w in [getattr(self, "alias_combo", None)]:
+    # Alias picker (Entry + dropdown button)
+    for w in [getattr(self, "entry_alias", None), getattr(self, "btn_alias_drop", None)]:
       if w is None:
         continue
       try:
-        w.configure(state=("readonly" if enabled else "disabled"))
+        w.configure(state=("normal" if enabled else "disabled"))
+      except Exception:
+        pass
+
+    if not enabled:
+      try:
+        if hasattr(self, "_alias_dropdown_hide"):
+          self._alias_dropdown_hide()
       except Exception:
         pass
 
@@ -1627,13 +2501,28 @@ class InventoryApp(ctk.CTk):
     return sku, name
 
   def _refresh_alias_dropdown(self) -> None:
-    if not hasattr(self, "alias_combo"):
-      return
-    values = [""] + self._build_alias_display_values()
+    """
+    Refresh the Transactions-tab Alias dropdown cache.
+
+    IMPORTANT:
+      We no longer use `alias_combo` (CTkComboBox). The Transactions tab now uses
+      `entry_alias` + an overlay dropdown, so this must NOT early-return when
+      `alias_combo` is absent.
+
+    Behavior:
+      - Rebuild `self._alias_dropdown_values` from `self.aliases_list`.
+      - Hide the overlay dropdown if it is currently visible.
+      - Sync the displayed alias text from the current SKU (if any).
+    """
+    self._alias_dropdown_values = [""] + self._build_alias_display_values()
+
+    # If dropdown is open, close it so it can't show stale entries
     try:
-      self.alias_combo.configure(values=values)
+      if hasattr(self, "_alias_dropdown_hide"):
+        self._alias_dropdown_hide()
     except Exception:
       pass
+
     # Keep selection consistent with current SKU
     self._sync_alias_choice_from_sku()
 
@@ -1669,11 +2558,8 @@ class InventoryApp(ctk.CTk):
         return
       sku, _name = self._parse_alias_display_value(choice)
       if sku:
+        # Set SKU, but DO NOT steal focus from the Alias dropdown.
         self.var_sku.set(sku)
-        try:
-          self.entry_qty.focus_set()
-        except Exception:
-          pass
     finally:
       self._alias_sync_guard = False
 
@@ -1792,35 +2678,6 @@ class InventoryApp(ctk.CTk):
       pass
     Log.ok(self.LOG_TAG, "Added/updated alias.", {"sku": sku})
 
-  def _on_alias_update_selected(self) -> None:
-    if not self.project_data_path:
-      messagebox.showerror("Project", "Select a Project Directory first.")
-      return
-    sel_sku = self._get_selected_alias_sku()
-    if not sel_sku:
-      messagebox.showinfo("Update", "Select an alias row first.")
-      return
-    try:
-      sku, name = self._read_alias_form()
-    except Exception as e:
-      messagebox.showerror("Invalid", str(e))
-      return
-
-    if sku != sel_sku:
-      # Renaming SKU key: delete old, insert new
-      self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sel_sku]
-    self._upsert_alias(sku, name)
-
-    self._save_and_refresh()
-    try:
-      if hasattr(self, "alias_tree") and self.alias_tree.exists(sku):
-        self.alias_tree.selection_set(sku)
-        self.alias_tree.focus(sku)
-        self.alias_tree.see(sku)
-    except Exception:
-      pass
-    Log.ok(self.LOG_TAG, "Updated alias.", {"sku": sel_sku, "new_sku": sku})
-
   def _on_alias_delete_selected(self) -> None:
     if not self.project_data_path:
       messagebox.showerror("Project", "Select a Project Directory first.")
@@ -1898,10 +2755,16 @@ class InventoryApp(ctk.CTk):
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
-    sel = self._get_selected_tx_id()
-    if sel is None:
+    ids = self._get_selected_tx_ids()
+    if not ids:
       messagebox.showinfo("Update", "Select a transaction row first.")
       return
+
+    if len(ids) != 1:
+      messagebox.showwarning("Update", "Please select exactly ONE transaction row to update.")
+      return
+
+    sel = ids[0]
 
     try:
       updated = self._read_form_to_transaction(existing_id=sel)
@@ -1911,6 +2774,7 @@ class InventoryApp(ctk.CTk):
 
     for i, t in enumerate(self.transactions):
       if t.id == sel:
+        # Preserve original insertion order for stable sorting.
         updated.created_order = t.created_order
         self.transactions[i] = updated
         break
@@ -1918,6 +2782,43 @@ class InventoryApp(ctk.CTk):
     self._save_and_refresh()
     self._select_tx_id(sel)
     Log.ok(self.LOG_TAG, "Updated transaction.", {"id": sel})
+
+  def _on_alias_update_selected(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+
+    skus = self._get_selected_alias_skus()
+    if not skus:
+      messagebox.showinfo("Update", "Select an alias row first.")
+      return
+
+    if len(skus) != 1:
+      messagebox.showwarning("Update", "Please select exactly ONE alias row to update.")
+      return
+
+    sel_sku = skus[0]
+
+    try:
+      sku, name = self._read_alias_form()
+    except Exception as e:
+      messagebox.showerror("Invalid", str(e))
+      return
+
+    if sku != sel_sku:
+      # Renaming SKU key: delete old, insert new
+      self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sel_sku]
+    self._upsert_alias(sku, name)
+
+    self._save_and_refresh()
+    try:
+      if hasattr(self, "alias_tree") and self.alias_tree.exists(sku):
+        self.alias_tree.selection_set(sku)
+        self.alias_tree.focus(sku)
+        self.alias_tree.see(sku)
+    except Exception:
+      pass
+    Log.ok(self.LOG_TAG, "Updated alias.", {"sku": sel_sku, "new_sku": sku})
 
   def _on_delete_selected(self) -> None:
     if not self.project_data_path:
