@@ -37,6 +37,50 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+def apply_entry_shortcuts(entry_widget) -> None:
+  """
+  Normalize common text shortcuts across OS for Tk/CustomTkinter entries:
+    - Ctrl+A selects all
+    - Ctrl+V replaces selection (if any), otherwise inserts at caret
+  """
+  # CTkEntry often wraps the real tk.Entry as `_entry`
+  inner = getattr(entry_widget, "_entry", entry_widget)
+
+  def _select_all(_e=None):
+    try:
+      inner.selection_range(0, tk.END)
+      inner.icursor(tk.END)
+    except Exception:
+      pass
+    return "break"
+
+  def _paste_replace(_e=None):
+    try:
+      # If there's a selection, delete it first (Windows-style replace).
+      try:
+        sel_first = inner.index("sel.first")
+        sel_last  = inner.index("sel.last")
+        inner.delete(sel_first, sel_last)
+      except Exception:
+        pass
+
+      clip = inner.clipboard_get()
+      inner.insert(tk.INSERT, clip)
+    except Exception:
+      pass
+    return "break"
+
+  # Windows/Linux
+  inner.bind("<Control-a>", _select_all, add="+")
+  inner.bind("<Control-A>", _select_all, add="+")
+  inner.bind("<Control-v>", _paste_replace, add="+")
+  inner.bind("<Control-V>", _paste_replace, add="+")
+  inner.bind("<Shift-Insert>", _paste_replace, add="+")
+
+  # macOS (optional)
+  inner.bind("<Command-a>", _select_all, add="+")
+  inner.bind("<Command-v>", _paste_replace, add="+")
+
 # =============================================================================
 # Tooltips (best-effort; optional dependency)
 # =============================================================================
@@ -1133,10 +1177,12 @@ class InventoryApp(ctk.CTk):
     ctk.CTkLabel(form_row, text="Date").grid(row=0, column=0, padx=(10, 6), pady=10)
     self.entry_date = ctk.CTkEntry(form_row, textvariable=self.var_date, width=120)
     self.entry_date.grid(row=0, column=1, padx=6, pady=10)
+    apply_entry_shortcuts(self.entry_date)
 
     ctk.CTkLabel(form_row, text="SKU").grid(row=0, column=2, padx=(14, 6), pady=10)
     self.entry_sku = ctk.CTkEntry(form_row, textvariable=self.var_sku, width=200)
     self.entry_sku.grid(row=0, column=3, padx=6, pady=10)
+    apply_entry_shortcuts(self.entry_sku)
 
     self.lbl_tx_alias = ctk.CTkLabel(form_row, text="Alias")
     self.lbl_tx_alias.grid(row=0, column=4, padx=(14, 6), pady=10)
@@ -1148,6 +1194,7 @@ class InventoryApp(ctk.CTk):
 
     self.entry_alias = ctk.CTkEntry(self.alias_picker, textvariable=self.var_alias_choice, width=226)
     self.entry_alias.grid(row=0, column=0, sticky="ew")
+    apply_entry_shortcuts(self.entry_alias)
 
     self.btn_alias_drop = ctk.CTkButton(self.alias_picker, text="▾", width=32)
     self.btn_alias_drop.grid(row=0, column=1, padx=(6, 0))
@@ -1432,16 +1479,19 @@ class InventoryApp(ctk.CTk):
     ctk.CTkLabel(form_row, text="Qty").grid(row=0, column=8, padx=(14, 6), pady=10)
     self.entry_qty = ctk.CTkEntry(form_row, textvariable=self.var_qty, width=80)
     self.entry_qty.grid(row=0, column=9, padx=6, pady=10)
+    apply_entry_shortcuts(self.entry_qty)
 
     self.lbl_unit_price = ctk.CTkLabel(form_row, text="Purchase Unit Cost")
     self.lbl_unit_price.grid(row=0, column=10, padx=(14, 6), pady=10)
 
     self.entry_unit_price = ctk.CTkEntry(form_row, textvariable=self.var_unit_price, width=120)
     self.entry_unit_price.grid(row=0, column=11, padx=6, pady=10)
+    apply_entry_shortcuts(self.entry_unit_price)
 
     ctk.CTkLabel(action_row, text="Note").grid(row=0, column=0, padx=(10, 6), pady=(0, 10))
     self.entry_note = ctk.CTkEntry(action_row, textvariable=self.var_note)
     self.entry_note.grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 10))
+    apply_entry_shortcuts(self.entry_note)
 
     buttons_frame = ctk.CTkFrame(action_row, fg_color="transparent")
     buttons_frame.grid(row=0, column=2, padx=(6, 10), pady=(0, 10), sticky="e")
@@ -2208,11 +2258,13 @@ class InventoryApp(ctk.CTk):
     self.var_alias_sku = tk.StringVar(value="")
     self.entry_alias_sku = ctk.CTkEntry(form, textvariable=self.var_alias_sku, width=220)
     self.entry_alias_sku.grid(row=0, column=1, padx=6, pady=10, sticky="w")
+    apply_entry_shortcuts(self.entry_alias_sku)
 
     ctk.CTkLabel(form, text="Name").grid(row=0, column=2, padx=(14, 6), pady=10, sticky="w")
     self.var_alias_name = tk.StringVar(value="")
     self.entry_alias_name = ctk.CTkEntry(form, textvariable=self.var_alias_name, width=360)
     self.entry_alias_name.grid(row=0, column=3, padx=6, pady=10, sticky="w")
+    apply_entry_shortcuts(self.entry_alias_name)
 
     btns = ctk.CTkFrame(form, fg_color="transparent")
     btns.grid(row=0, column=4, padx=(12, 10), pady=10, sticky="e")
