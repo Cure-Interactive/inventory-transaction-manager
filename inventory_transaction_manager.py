@@ -3197,7 +3197,35 @@ class InventoryApp(ctk.CTk):
 
     self.ov_tree.delete(*self.ov_tree.get_children())
 
-    for i, sku in enumerate(sorted(overview.keys())):
+    def _ov_sort_key(sku_key: str):
+      s = overview.get(sku_key) or {}
+      qty = int(s.get("onhand_qty", 0) or 0)
+      status = str(s.get("status") or "").strip().upper()
+
+      # Group order:
+      #   0 = NEGATIVE (top)
+      #   1 = IN STOCK
+      #   2 = OUT (bottom)
+      if qty < 0 or "NEGATIVE" in status:
+        grp = 0
+      elif qty == 0 or status == "OUT":
+        grp = 2
+      else:
+        grp = 1
+
+      sku_norm = str(s.get("sku") or sku_key or "").strip()
+      alias = self._get_alias_for_sku(sku_norm)
+      alias_norm = str(alias or "").strip().lower()
+      sku_norm_l = sku_norm.lower()
+
+      # Within NEGATIVE: most negative first (e.g., -10 before -1)
+      neg_qty_key = qty if grp == 0 else 0
+
+      return (grp, neg_qty_key, alias_norm, sku_norm_l)
+
+    sorted_skus = sorted(overview.keys(), key=_ov_sort_key)
+
+    for i, sku in enumerate(sorted_skus):
       s = overview[sku]
       pad_l = "  "  # 2 spaces
 
