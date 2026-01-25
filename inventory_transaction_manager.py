@@ -2319,12 +2319,42 @@ class InventoryApp(ctk.CTk):
 
     def _alias_on_hover(event) -> None:
       region = self.alias_tree.identify_region(event.x, event.y)
-      if region != "heading":
+
+      # Header hover tooltip
+      if region == "heading":
+        col = self.alias_tree.identify_column(event.x)
+        if not col or col == "#0":
+          _alias_tip_hide()
+          return
+
+        cols = list(self.alias_tree["columns"])
+        try:
+          idx = int(col[1:]) - 1
+        except Exception:
+          _alias_tip_hide()
+          return
+
+        if idx < 0 or idx >= len(cols):
+          _alias_tip_hide()
+          return
+
+        col_id = cols[idx]
+        text = str(_alias_header_tooltips.get(col_id) or col_id)
+
+        key = ("__heading__", col_id, text)
+        if _alias_tip_state["last"] != key:
+          _alias_tip_state["last"] = key
+        _alias_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+        return
+
+      # Cell hover tooltip: show ONLY hovered cell value (literal)
+      if region != "cell":
         _alias_tip_hide()
         return
 
+      iid = self.alias_tree.identify_row(event.y)
       col = self.alias_tree.identify_column(event.x)
-      if not col or col == "#0":
+      if not iid or not col or col == "#0":
         _alias_tip_hide()
         return
 
@@ -2340,12 +2370,21 @@ class InventoryApp(ctk.CTk):
         return
 
       col_id = cols[idx]
-      text = str(_alias_header_tooltips.get(col_id) or col_id)
 
-      key = ("__heading__", col_id, text)
+      try:
+        val = self.alias_tree.set(iid, col_id)
+      except Exception:
+        _alias_tip_hide()
+        return
+
+      text = str(val)
+      key = (iid, col_id, text)
+
       if _alias_tip_state["last"] != key:
         _alias_tip_state["last"] = key
-      _alias_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+        _alias_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+      else:
+        _alias_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
 
     self.alias_tree.bind("<Motion>", _alias_on_hover)
     self.alias_tree.bind("<Leave>", lambda _e: _alias_tip_hide())
