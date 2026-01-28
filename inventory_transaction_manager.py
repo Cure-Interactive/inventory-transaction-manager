@@ -91,6 +91,30 @@ def apply_entry_shortcuts(entry_widget) -> None:
   inner.bind("<Command-v>", _paste_replace, add="+")
 
 # =============================================================================
+# Windows Taskbar Identity (AppUserModelID)
+# =============================================================================
+
+def set_windows_app_user_model_id(app_id: str) -> None:
+  """
+  Set an explicit Windows AppUserModelID for this process (best-effort).
+
+  Notes:
+  - No-op on non-Windows.
+  - Call BEFORE creating the Tk/CTk window (i.e., early in main()).
+  """
+  try:
+    if os.name != "nt":
+      return
+
+    import ctypes  # stdlib, Windows-only usage
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(str(app_id))
+  except Exception:
+    return
+
+APP_USER_MODEL_ID = "CureInteractive.InventoryTransactionManager"
+
+# =============================================================================
 # Tooltips (best-effort; optional dependency)
 # =============================================================================
 
@@ -546,6 +570,8 @@ def money(x: float) -> str:
 # [🖥️ UI App]
 # =============================================================================
 
+APP_TITLE = "Inventory Transaction Manager - Cure Interactive"
+
 class InventoryApp(ctk.CTk):
   def __init__(self) -> None:
     super().__init__()
@@ -553,7 +579,7 @@ class InventoryApp(ctk.CTk):
     set_window_icon(self, APP_ICON_ICO_PATH, APP_ICON_PNG_PATH)
 
     self.LOG_TAG = "[🧮 Inventory]"
-    self.title("Inventory Transaction Manager (Weighted Avg Cost)")
+    self.title(APP_TITLE)
 
     self.geometry("1480x820")
     ctk.set_appearance_mode("Dark")
@@ -3916,6 +3942,9 @@ class InventoryApp(ctk.CTk):
 # =============================================================================
 
 def main() -> None:
+  # Must happen early for best taskbar behavior on Windows.
+  set_windows_app_user_model_id(APP_USER_MODEL_ID)
+
   app = InventoryApp()
   app.mainloop()
 
