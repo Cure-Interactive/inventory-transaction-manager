@@ -3320,8 +3320,11 @@ class InventoryApp(ctk.CTk):
       return
 
     if sku != sel_sku:
-      # Renaming SKU key: delete old, insert new
+      # Renaming SKU key: delete old alias row and migrate existing transactions.
       self.aliases_list = [a for a in self.aliases_list if str(a.get("sku") or "").strip() != sel_sku]
+      for tx in self.transactions:
+        if str(tx.sku or "").strip() == sel_sku:
+          tx.sku = sku
     self._upsert_alias(sku, name)
 
     self._save_and_refresh()
