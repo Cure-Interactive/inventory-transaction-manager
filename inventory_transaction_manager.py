@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -87,8 +88,24 @@ def apply_entry_shortcuts(entry_widget) -> None:
   inner.bind("<Shift-Insert>", _paste_replace, add="+")
 
   # macOS (optional)
-  inner.bind("<Command-a>", _select_all, add="+")
-  inner.bind("<Command-v>", _paste_replace, add="+")
+  if sys.platform == "darwin":
+    inner.bind("<Command-a>", _select_all, add="+")
+    inner.bind("<Command-v>", _paste_replace, add="+")
+
+
+def bind_enter_shortcut(widget, callback) -> None:
+  """Bind Enter and keypad Enter to a callback for a specific widget."""
+  target = getattr(widget, "_entry", widget)
+
+  def _on_enter(_e=None):
+    try:
+      callback()
+    except Exception:
+      return None
+    return "break"
+
+  target.bind("<Return>", _on_enter, add="+")
+  target.bind("<KP_Enter>", _on_enter, add="+")
 
 # =============================================================================
 # Windows Taskbar Identity (AppUserModelID)
@@ -880,7 +897,7 @@ class InventoryApp(ctk.CTk):
       (getattr(self, "entry_qty", None), "Qty: number of units bought/sold."),
       (getattr(self, "entry_unit_price", None), "Unit Price: purchase cost per unit (for Purchase) or sale price per unit (for Sale)."),
       (getattr(self, "entry_note", None), "Note: optional text for receipts, customer, order, etc."),
-      (getattr(self, "btn_add", None), "Add: append a new transaction row."),
+      (getattr(self, "btn_add", None), "Add: append a new transaction row. (Enter)"),
       (getattr(self, "btn_update", None), "Update Selected: edit the selected transaction row. Enabled only when exactly one row is selected."),
 
       (getattr(self, "btn_delete", None), "Delete: remove the selected transaction row."),
@@ -901,7 +918,7 @@ class InventoryApp(ctk.CTk):
     for w, msg in [
       (getattr(self, "entry_alias_name", None), "Alias Name: friendly display name (e.g., 'NES Controller')."),
       (getattr(self, "entry_alias_sku", None), "Alias SKU: the SKU value this alias maps to."),
-      (getattr(self, "btn_alias_add", None), "Add Alias: create a new alias mapping."),
+      (getattr(self, "btn_alias_add", None), "Add Alias: create a new alias mapping. (Enter)"),
       (getattr(self, "btn_alias_update", None), "Update Selected: edit the selected alias mapping. Enabled only when exactly one row is selected."),
 
       (getattr(self, "btn_alias_delete", None), "Delete Alias: remove the selected alias mapping."),
@@ -1819,7 +1836,7 @@ class InventoryApp(ctk.CTk):
     buttons_frame = ctk.CTkFrame(action_row, fg_color="transparent")
     buttons_frame.grid(row=0, column=2, padx=(6, 10), pady=(0, 10), sticky="e")
 
-    self.btn_add = ctk.CTkButton(buttons_frame, text="Add", command=self._on_add)
+    self.btn_add = ctk.CTkButton(buttons_frame, text="Add (Enter)", command=self._on_add)
     self.btn_add.grid(row=0, column=0, padx=6, sticky="ew")
 
     self.btn_update = ctk.CTkButton(buttons_frame, text="Update Selected", command=self._on_update_selected)
@@ -1836,6 +1853,17 @@ class InventoryApp(ctk.CTk):
 
     self.btn_export = ctk.CTkButton(buttons_frame, text="Export CSV", command=self._export_csv)
     self.btn_export.grid(row=0, column=3, padx=6, sticky="ew")
+
+    for w in [
+      self.entry_date,
+      self.entry_sku,
+      self.entry_alias,
+      self.entry_qty,
+      self.entry_unit_price,
+      self.entry_note,
+      self.btn_add,
+    ]:
+      bind_enter_shortcut(w, self._on_add)
 
     # ---------------------------------------------------------
     # Transactions Table (ttk.Treeview) — gitea-like behavior
@@ -2592,7 +2620,7 @@ class InventoryApp(ctk.CTk):
     btns = ctk.CTkFrame(form, fg_color="transparent")
     btns.grid(row=0, column=4, padx=(12, 10), pady=10, sticky="e")
 
-    self.btn_alias_add = ctk.CTkButton(btns, text="Add", width=110, command=self._on_alias_add)
+    self.btn_alias_add = ctk.CTkButton(btns, text="Add (Enter)", width=110, command=self._on_alias_add)
     self.btn_alias_add.grid(row=0, column=0, padx=6)
 
     self.btn_alias_update = ctk.CTkButton(btns, text="Update Selected", width=160, command=self._on_alias_update_selected)
@@ -2607,6 +2635,13 @@ class InventoryApp(ctk.CTk):
       command=self._on_alias_delete_selected,
     )
     self.btn_alias_delete.grid(row=0, column=2, padx=6)
+
+    for w in [
+      self.entry_alias_sku,
+      self.entry_alias_name,
+      self.btn_alias_add,
+    ]:
+      bind_enter_shortcut(w, self._on_alias_add)
 
     # Table
     table_frame = ctk.CTkFrame(self.tab_alias)
