@@ -2364,18 +2364,6 @@ class InventoryApp(ctk.CTk):
       "gross_profit": "Gross Profit: Sales Rev − COGS (for SALE rows).",
       "note": "Note: free text note for receipts/orders/etc.",
     }
-    for entry in self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS):
-      key = str(entry.get("key") or "").strip()
-      if not key:
-        continue
-      dtype = self._normalize_custom_type(entry.get("type"))
-      tip = f"{key}: alias custom field ({dtype})."
-      if dtype == CUSTOM_TYPE_ENUM:
-        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
-        if vals:
-          tip = f"{key}: alias enum field. Values: {vals}."
-      header_tooltips[key] = tip
-
     def _tree_on_hover(event) -> None:
       region = self.tx_tree.identify_region(event.x, event.y)
 
@@ -2397,7 +2385,9 @@ class InventoryApp(ctk.CTk):
           return
 
         col_id = cols[idx]
-        text = str(header_tooltips.get(col_id) or headings.get(col_id) or col_id).strip()
+        text = self._build_custom_column_tooltip(col_id, alias_only=False)
+        if not text:
+          text = str(header_tooltips.get(col_id) or headings.get(col_id) or col_id).strip()
 
         key = ("__heading__", col_id, text)
         if _tree_tip_state["last"] != key:
@@ -2722,18 +2712,6 @@ class InventoryApp(ctk.CTk):
       "sales_amount": "Sales Amount: sum of sales revenue in the month.",
       "cogs": "COGS: sum of cost-of-goods-sold in the month.",
     }
-    for entry in self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS):
-      key = str(entry.get("key") or "").strip()
-      if not key:
-        continue
-      dtype = self._normalize_custom_type(entry.get("type"))
-      tip = f"{key}: custom per-SKU field ({dtype})."
-      if dtype == CUSTOM_TYPE_ENUM:
-        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
-        if vals:
-          tip = f"{key}: custom per-SKU enum field. Values: {vals}."
-      header_tooltips[key] = tip
-
     def _tree_on_hover(event) -> None:
       region = self.ov_tree.identify_region(event.x, event.y)
 
@@ -2758,7 +2736,9 @@ class InventoryApp(ctk.CTk):
         col_id = cols[idx]
 
         # Prefer our map, else fall back to the displayed heading text (strip gutter).
-        text = header_tooltips.get(col_id)
+        text = self._build_custom_column_tooltip(col_id, alias_only=True)
+        if not text:
+          text = header_tooltips.get(col_id)
         if not text:
           try:
             text = str(self.ov_tree.heading(col_id, "text") or "").strip()
@@ -2991,19 +2971,6 @@ class InventoryApp(ctk.CTk):
       "sku": "SKU: the inventory identifier this alias maps to.",
       "name": "Name: friendly display name shown in tables and dropdowns.",
     }
-    for entry in self._get_all_custom_schema_in_display_order():
-      key = str(entry.get("key") or "").strip()
-      if not key:
-        continue
-      dtype = self._normalize_custom_type(entry.get("type"))
-      target = self._normalize_custom_target(entry.get("target"))
-      tip = f"{key}: {target} custom field ({dtype})."
-      if dtype == CUSTOM_TYPE_ENUM:
-        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
-        if vals:
-          tip = f"{key}: {target} enum field. Values: {vals}."
-      _alias_header_tooltips[key] = tip
-
     def _alias_on_hover(event) -> None:
       region = self.alias_tree.identify_region(event.x, event.y)
 
@@ -3026,7 +2993,9 @@ class InventoryApp(ctk.CTk):
           return
 
         col_id = cols[idx]
-        text = str(_alias_header_tooltips.get(col_id) or col_id)
+        text = self._build_custom_column_tooltip(col_id, alias_only=False)
+        if not text:
+          text = str(_alias_header_tooltips.get(col_id) or col_id)
 
         key = ("__heading__", col_id, text)
         if _alias_tip_state["last"] != key:
@@ -3238,10 +3207,142 @@ class InventoryApp(ctk.CTk):
     self.custom_schema_tree.column("enum", width=260, minwidth=140, anchor="w", stretch=True)
     self.custom_schema_tree.column("description", width=420, minwidth=180, anchor="w", stretch=True)
 
+    _schema_tip_state = {"win": None, "lbl": None, "font": None, "last": None}
+
+    def _schema_tip_hide() -> None:
+      win = _schema_tip_state.get("win")
+      if win is not None:
+        try:
+          win.destroy()
+        except Exception:
+          pass
+      _schema_tip_state["win"] = None
+      _schema_tip_state["lbl"] = None
+      _schema_tip_state["last"] = None
+
+    def _schema_tip_show(*, text: str, x_root: int, y_root: int) -> None:
+      if _schema_tip_state["win"] is None:
+        win = tk.Toplevel(self)
+        win.withdraw()
+        win.overrideredirect(True)
+        try:
+          win.attributes("-topmost", True)
+        except Exception:
+          pass
+
+        bg = _ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"])
+        fg = _ctk_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+
+        from tkinter import font as tkfont
+        if _schema_tip_state["font"] is None:
+          f = tkfont.nametofont("TkDefaultFont").copy()
+          try:
+            f.configure(size=int(f.cget("size")) + 4)
+          except Exception:
+            f.configure(size=14)
+          _schema_tip_state["font"] = f
+
+        lbl = tk.Label(
+          win,
+          text="",
+          justify="left",
+          anchor="w",
+          padx=8,
+          pady=4,
+          bg=bg,
+          fg=fg,
+          font=_schema_tip_state["font"],
+          bd=1,
+          relief="solid",
+        )
+        lbl.pack()
+        _schema_tip_state["win"] = win
+        _schema_tip_state["lbl"] = lbl
+
+      win = _schema_tip_state["win"]
+      lbl = _schema_tip_state["lbl"]
+      if win is None or lbl is None:
+        return
+
+      lbl.configure(text=text)
+      try:
+        win.geometry(f"+{x_root + 14}+{y_root + 16}")
+        win.deiconify()
+      except Exception:
+        pass
+
+    _schema_header_tooltips = {
+      "key": "Field Name: custom field identifier shown in generated editors and columns.",
+      "target": "Target: whether the field belongs to transactions or aliases.",
+      "type": "Type: string, number, boolean, or enum.",
+      "enum": "Enum Values: allowed choices for enum fields.",
+      "description": "Description: tooltip text shown on generated custom field labels and inputs.",
+    }
+
+    def _on_schema_tree_hover(event) -> None:
+      region = self.custom_schema_tree.identify_region(event.x, event.y)
+
+      if region == "heading":
+        col = self.custom_schema_tree.identify_column(event.x)
+        if not col or col == "#0":
+          _schema_tip_hide()
+          return
+        cols = list(self.custom_schema_tree["columns"])
+        try:
+          idx = int(col[1:]) - 1
+        except Exception:
+          _schema_tip_hide()
+          return
+        if idx < 0 or idx >= len(cols):
+          _schema_tip_hide()
+          return
+        col_id = cols[idx]
+        text = str(_schema_header_tooltips.get(col_id) or col_id)
+        key = ("__heading__", col_id, text)
+        if _schema_tip_state["last"] != key:
+          _schema_tip_state["last"] = key
+        _schema_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+        return
+
+      if region != "cell":
+        _schema_tip_hide()
+        return
+
+      iid = self.custom_schema_tree.identify_row(event.y)
+      col = self.custom_schema_tree.identify_column(event.x)
+      if not iid or not col or col == "#0":
+        _schema_tip_hide()
+        return
+      cols = list(self.custom_schema_tree["columns"])
+      try:
+        idx = int(col[1:]) - 1
+      except Exception:
+        _schema_tip_hide()
+        return
+      if idx < 0 or idx >= len(cols):
+        _schema_tip_hide()
+        return
+      col_id = cols[idx]
+      try:
+        text = str(self.custom_schema_tree.set(iid, col_id))
+      except Exception:
+        _schema_tip_hide()
+        return
+      key = (iid, col_id, text)
+      if _schema_tip_state["last"] != key:
+        _schema_tip_state["last"] = key
+      _schema_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+
     def _on_schema_select(_e=None) -> None:
       self._load_selected_custom_schema_into_form()
       self._sync_custom_schema_update_selected_state()
 
+    self.custom_schema_tree.bind("<Motion>", _on_schema_tree_hover)
+    self.custom_schema_tree.bind("<Leave>", lambda _e: _schema_tip_hide())
+    self.custom_schema_tree.bind("<ButtonPress>", lambda _e: _schema_tip_hide())
+    self.custom_schema_tree.bind("<MouseWheel>", lambda _e: _schema_tip_hide())
+    self.custom_schema_tree.bind("<Button-4>", lambda _e: _schema_tip_hide())
+    self.custom_schema_tree.bind("<Button-5>", lambda _e: _schema_tip_hide())
     self.custom_schema_tree.bind("<<TreeviewSelect>>", _on_schema_select)
     self._refresh_custom_schema_ui()
 
@@ -3869,6 +3970,24 @@ class InventoryApp(ctk.CTk):
 
   def _get_all_custom_schema_in_display_order(self) -> List[Dict[str, Any]]:
     return [dict(x) for x in (self.custom_fields_schema or []) if str(x.get("key") or "").strip()]
+
+  def _build_custom_column_tooltip(self, key: str, *, alias_only: bool = False) -> Optional[str]:
+    key_s = str(key or "").strip()
+    if not key_s:
+      return None
+    entries = self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS) if alias_only else self._get_all_custom_schema_in_display_order()
+    entry = next((x for x in entries if str(x.get("key") or "").strip() == key_s), None)
+    if not entry:
+      return None
+    desc = str(entry.get("description") or "").strip()
+    if desc:
+      return f"{key_s}: {desc}"
+    dtype = self._normalize_custom_type(entry.get("type"))
+    target = self._normalize_custom_target(entry.get("target"))
+    vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
+    if dtype == CUSTOM_TYPE_ENUM and vals:
+      return f"{key_s}: {target} enum field. Values: {vals}."
+    return f"{key_s}: {target} custom field ({dtype})."
 
   def _get_transaction_custom_value_for_overview(self, sku: str, key: str) -> Any:
     sku_s = str(sku or "").strip()
