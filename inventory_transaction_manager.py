@@ -183,6 +183,27 @@ def tooltip(*widgets: Any, text: str) -> None:
       except Exception:
         pass
 
+def clear_tooltip(*widgets: Any) -> None:
+  for w in widgets:
+    if w is None:
+      continue
+    old = getattr(w, "_cure_tooltip", None)
+    if old is not None:
+      try:
+        if hasattr(old, "hide"):
+          old.hide()
+      except Exception:
+        pass
+      try:
+        if hasattr(old, "destroy"):
+          old.destroy()
+      except Exception:
+        pass
+    try:
+      w._cure_tooltip = None  # type: ignore[attr-defined]
+    except Exception:
+      pass
+
 
 # =============================================================================
 # Window Icon (title bar / taskbar best-effort)
@@ -353,6 +374,23 @@ APP_CONFIG_PATH = os.path.join(SCRIPT_ROOT_DIR, APP_CONFIG_FILENAME)
 
 PROJECT_DATA_FILENAME = "inventory_data.json"
 
+CUSTOM_TYPE_STRING = "string"
+CUSTOM_TYPE_NUMBER = "number"
+CUSTOM_TYPE_BOOLEAN = "boolean"
+CUSTOM_TYPE_ENUM = "enum"
+CUSTOM_FIELD_TYPES = [
+  CUSTOM_TYPE_STRING,
+  CUSTOM_TYPE_NUMBER,
+  CUSTOM_TYPE_BOOLEAN,
+  CUSTOM_TYPE_ENUM,
+]
+CUSTOM_TARGET_TRANSACTION = "transaction"
+CUSTOM_TARGET_ALIAS = "alias"
+CUSTOM_FIELD_TARGETS = [
+  CUSTOM_TARGET_TRANSACTION,
+  CUSTOM_TARGET_ALIAS,
+]
+
 
 # =============================================================================
 # [🧰 Logging] cure-log-ish minimal console logger
@@ -392,7 +430,12 @@ class Log:
     base = f"[{Log._ts()}] {icon} {tag} {msg}"
     if data:
       base += f" {data}"
-    print(f"{color}{base}{Log.ANSI['reset']}")
+    line = f"{color}{base}{Log.ANSI['reset']}"
+    try:
+      print(line)
+    except UnicodeEncodeError:
+      safe_base = base.encode("ascii", errors="replace").decode("ascii")
+      print(f"{color}{safe_base}{Log.ANSI['reset']}")
 
 
 # =============================================================================
@@ -410,6 +453,11 @@ class Transaction:
   sale_unit_price: float = 0.0
   note: str = ""
   created_order: int = 0
+  custom_fields: Dict[str, Any] = None  # type: ignore[assignment]
+
+  def __post_init__(self) -> None:
+    if not isinstance(self.custom_fields, dict):
+      self.custom_fields = {}
 
 
 # =============================================================================
@@ -489,6 +537,7 @@ class InventoryEngine:
         "sales_rev": sales_rev,
         "gross_profit": gross_profit,
         "note": t.note,
+        "custom_fields": dict(t.custom_fields or {}),
       })
 
     overview: Dict[str, Dict[str, Any]] = {}
@@ -640,6 +689,10 @@ class InventoryApp(ctk.CTk):
     self.aliases_list: List[Dict[str, str]] = []
     self._alias_map: Dict[str, str] = {}  # normalized lookup (sku -> name)
 
+    # Custom per-SKU fields
+    self.custom_fields_schema: List[Dict[str, Any]] = []
+    self._custom_field_schema_map: Dict[str, Dict[str, Any]] = {}
+
     # Guard flags for SKU/Alias UI syncing
     self._alias_sync_guard = False
 
@@ -718,17 +771,92 @@ class InventoryApp(ctk.CTk):
       return ""
     return str(self._alias_map.get(s) or "").strip()
 
-  def _load_project_data_from_file(self, path: str) -> Tuple[List[Transaction], List[Dict[str, str]]]:
+  def _normalize_custom_type(self, raw: Any) -> str:
+    t = str(raw or "").strip().lower()
+    if t in CUSTOM_FIELD_TYPES:
+      return t
+    return CUSTOM_TYPE_STRING
+
+  def _normalize_custom_target(self, raw: Any) -> str:
+    t = str(raw or "").strip().lower()
+    if t in CUSTOM_FIELD_TARGETS:
+      return t
+    return CUSTOM_TARGET_ALIAS
+
+  def _normalize_enum_values(self, raw: Any) -> List[str]:
+    seq = raw if isinstance(raw, list) else [raw]
+    out: List[str] = []
+    seen = set()
+    for item in seq:
+      val = str(item or "").strip()
+      if not val or val in seen:
+        continue
+      seen.add(val)
+      out.append(val)
+    return out
+
+  def _normalize_custom_schema_entries(self, raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+      return []
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in raw:
+      if not isinstance(item, dict):
+        continue
+      key = str(item.get("key") or "").strip()
+      if not key:
+        continue
+      key_norm = key.lower()
+      if key_norm in seen:
+        continue
+      seen.add(key_norm)
+      dtype = self._normalize_custom_type(item.get("type"))
+      entry = {
+        "key": key,
+        "target": self._normalize_custom_target(item.get("target")),
+        "type": dtype,
+        "description": str(item.get("description") or "").strip(),
+        "enum": self._normalize_enum_values(item.get("enum", [])) if dtype == CUSTOM_TYPE_ENUM else [],
+      }
+      out.append(entry)
+    return out
+
+  def _normalize_entity_custom_values(self, raw: Any, schema: List[Dict[str, Any]], *, target: str) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+      return {}
+    schema_map = {
+      str(x.get("key") or "").strip(): x
+      for x in (schema or [])
+      if str(x.get("key") or "").strip() and self._normalize_custom_target(x.get("target")) == target
+    }
+    out: Dict[str, Any] = {}
+    for key, val in raw.items():
+      key_s = str(key or "").strip()
+      if not key_s or key_s not in schema_map:
+        continue
+      coerced = self._coerce_custom_field_value(schema_map[key_s], val, raise_on_error=False)
+      if coerced is not None:
+        out[key_s] = coerced
+    return out
+
+  def _load_project_data_from_file(self, path: str) -> Tuple[List[Transaction], List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not os.path.exists(path):
-      return [], []
+      return [], [], []
     with open(path, "r", encoding="utf-8") as f:
       raw = json.load(f)
 
+    schema = self._normalize_custom_schema_entries(raw.get("custom_fields_schema", []))
+    legacy_alias_values_by_sku = raw.get("custom_field_values", {})
+
     txs: List[Transaction] = []
     for item in raw.get("transactions", []):
-      txs.append(Transaction(**item))
+      if not isinstance(item, dict):
+        continue
+      item2 = dict(item)
+      item2["custom_fields"] = self._normalize_entity_custom_values(item2.get("custom_fields", {}), schema, target=CUSTOM_TARGET_TRANSACTION)
+      txs.append(Transaction(**item2))
 
-    aliases: List[Dict[str, str]] = []
+    aliases: List[Dict[str, Any]] = []
     raw_aliases = raw.get("aliases", [])
     if isinstance(raw_aliases, dict):
       # Legacy-ish fallback: {"SKU":"Name", ...}
@@ -736,7 +864,7 @@ class InventoryApp(ctk.CTk):
         sku = str(k or "").strip()
         name = str(v or "").strip()
         if sku and name:
-          aliases.append({"sku": sku, "name": name})
+          aliases.append({"sku": sku, "name": name, "custom_fields": {}})
     elif isinstance(raw_aliases, list):
       for a in raw_aliases:
         if not isinstance(a, dict):
@@ -744,17 +872,25 @@ class InventoryApp(ctk.CTk):
         sku = str(a.get("sku") or "").strip()
         name = str(a.get("name") or "").strip()
         if sku and name:
-          aliases.append({"sku": sku, "name": name})
+          custom_fields = self._normalize_entity_custom_values(a.get("custom_fields", {}), schema, target=CUSTOM_TARGET_ALIAS)
+          if not custom_fields and isinstance(legacy_alias_values_by_sku, dict):
+            custom_fields = self._normalize_entity_custom_values(legacy_alias_values_by_sku.get(sku, {}), schema, target=CUSTOM_TARGET_ALIAS)
+          aliases.append({"sku": sku, "name": name, "custom_fields": custom_fields})
 
-    # Stable sort for UI
     aliases.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
+    return txs, aliases, schema
 
-    return txs, aliases
-
-  def _save_project_data_to_file(self, path: str, txs: List[Transaction], aliases: List[Dict[str, str]]) -> None:
+  def _save_project_data_to_file(
+    self,
+    path: str,
+    txs: List[Transaction],
+    aliases: List[Dict[str, Any]],
+    custom_schema: List[Dict[str, Any]],
+  ) -> None:
     payload = {
       "transactions": [asdict(t) for t in txs],
       "aliases": list(aliases or []),
+      "custom_fields_schema": list(custom_schema or []),
     }
     _write_json_atomic(path, payload)
 
@@ -767,13 +903,15 @@ class InventoryApp(ctk.CTk):
     self.project_dir = p
     self.project_data_path = self._project_data_file_for_dir(p)
 
-    txs, aliases = self._load_project_data_from_file(self.project_data_path)
+    txs, aliases, custom_schema = self._load_project_data_from_file(self.project_data_path)
 
     self.transactions = txs
     self._normalize_sort()
 
     self.aliases_list = aliases
     self._rebuild_alias_map()
+    self.custom_fields_schema = custom_schema
+    self._rebuild_custom_field_schema_map()
 
     self.next_id = (max([t.id for t in self.transactions], default=0) + 1)
     self.next_created_order = (max([t.created_order for t in self.transactions], default=0) + 1)
@@ -782,17 +920,37 @@ class InventoryApp(ctk.CTk):
     self._set_tx_controls_enabled(True)
 
     self._refresh_aliases_ui()
+    self._refresh_custom_schema_ui()
+    self._configure_overview_tree_for_view()
     self._refresh_all()
 
-    Log.ok(self.LOG_TAG, "Loaded project.", {"project_dir": p, "tx_count": len(self.transactions), "alias_count": len(self.aliases_list)})
+    Log.ok(self.LOG_TAG, "Loaded project.", {
+      "project_dir": p,
+      "tx_count": len(self.transactions),
+      "alias_count": len(self.aliases_list),
+      "custom_field_count": len(self.custom_fields_schema),
+    })
 
-  def _save_and_refresh(self) -> None:
+  def _save_and_refresh(self, *, schema_changed: bool = False) -> None:
     if not self.project_data_path:
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     self._normalize_sort()
-    self._save_project_data_to_file(self.project_data_path, self.transactions, self.aliases_list)
+    self._save_project_data_to_file(
+      self.project_data_path,
+      self.transactions,
+      self.aliases_list,
+      self.custom_fields_schema,
+    )
     self._refresh_aliases_ui()
+    if schema_changed:
+      self._refresh_custom_schema_ui()
+      self._configure_overview_tree_for_view()
+    else:
+      self._update_tx_custom_fields_editor_values(next((t for t in self.transactions if t.id == self._get_selected_tx_id()), None))
+      self._update_alias_custom_fields_editor_values(
+        next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == str(self._get_selected_alias_sku() or "").strip()), None)
+      )
     self._refresh_all()
 
   # -----------------------------------------------------------------------------
@@ -829,6 +987,7 @@ class InventoryApp(ctk.CTk):
         "Transactions": "Transactions: add/update/delete purchases & sales. This drives costing and the overview.",
         "Overview": "Overview: current inventory state (on-hand qty, WAC, totals) and optional summaries.",
         "Aliases": "Aliases: map friendly names to SKUs. Used in dropdowns and tables.",
+        "Custom Fields": "Custom Fields: define typed fields for transactions or aliases, including enum lists and tooltip descriptions.",
       }
 
       for tab_name, tip in tip_by_tab.items():
@@ -861,7 +1020,7 @@ class InventoryApp(ctk.CTk):
         pass
 
     try:
-      _attach(self.tabs, "Tabs: switch between Transactions, Overview, and Aliases.")
+      _attach(self.tabs, "Tabs: switch between Transactions, Overview, Aliases, and Custom Fields.")
     except Exception:
       pass
 
@@ -923,6 +1082,26 @@ class InventoryApp(ctk.CTk):
 
       (getattr(self, "btn_alias_delete", None), "Delete Alias: remove the selected alias mapping."),
       (getattr(self, "alias_tree", None), "Aliases table: select an alias to edit or delete."),
+    ]:
+      _attach(w, msg)
+
+    # Custom Fields tab
+    for w, msg in [
+      (getattr(self, "entry_custom_schema_key", None), "Field Name: the custom column name used on the selected target."),
+      (getattr(self, "opt_custom_schema_target", None), "Target: choose whether this field belongs to transactions or aliases."),
+      (getattr(self, "opt_custom_schema_type", None), "Field Type: choose string, number, boolean, or enum."),
+      (getattr(self, "entry_custom_schema_enum", None), "Enum Values: enter one value, then use Add Value to build the allowed list."),
+      (getattr(self, "btn_custom_enum_add", None), "Add Value: append the typed enum value to the allowed-values list."),
+      (getattr(self, "btn_custom_enum_remove", None), "Remove: delete the selected enum values from the allowed-values list."),
+      (getattr(self, "btn_custom_enum_clear", None), "Clear: remove all enum values from the allowed-values list."),
+      (getattr(self, "custom_schema_enum_tree", None), "Allowed Values: the enum choices that will appear in generated inputs."),
+      (getattr(self, "entry_custom_schema_description", None), "Description: optional tooltip text shown on the generated custom field label and input."),
+      (getattr(self, "btn_custom_schema_add", None), "Add Field: create a new custom field definition."),
+      (getattr(self, "btn_custom_schema_update", None), "Update Selected: edit the selected custom field definition."),
+      (getattr(self, "btn_custom_schema_delete", None), "Delete Selected: remove the selected custom field definition and its saved values."),
+      (getattr(self, "btn_custom_schema_up", None), "Move Up: shift the selected custom field earlier in display order."),
+      (getattr(self, "btn_custom_schema_down", None), "Move Down: shift the selected custom field later in display order."),
+      (getattr(self, "custom_schema_tree", None), "Custom Fields table: schema definitions for target-specific transaction or alias fields."),
     ]:
       _attach(w, msg)
 
@@ -1181,10 +1360,12 @@ class InventoryApp(ctk.CTk):
     self.tab_tx = self.tabs.add("Transactions")
     self.tab_ov = self.tabs.add("Overview")
     self.tab_alias = self.tabs.add("Aliases")
+    self.tab_custom = self.tabs.add("Custom Fields")
 
     self._build_transactions_tab()
     self._build_overview_tab()
     self._build_aliases_tab()
+    self._build_custom_fields_tab()
     # Tooltips (best-effort): attach curated tips first, then fill in the rest.
     self._install_tooltips_explicit()
     # IMPORTANT: Do NOT recurse from the app root; it creates a root-level tooltip ("InventoryApp")
@@ -1192,7 +1373,7 @@ class InventoryApp(ctk.CTk):
     self._install_tooltips_recursive(self.tabs)
 
   def _build_transactions_tab(self) -> None:
-    # Row 0: inputs. Row 1: note + action buttons. Row 2: table.
+    # Row 0: inputs. Row 1: note + action buttons + custom fields. Row 2: table.
     self.tab_tx.grid_rowconfigure(0, weight=0)
     self.tab_tx.grid_rowconfigure(1, weight=0)
     self.tab_tx.grid_rowconfigure(2, weight=1)
@@ -1865,6 +2046,12 @@ class InventoryApp(ctk.CTk):
     ]:
       bind_enter_shortcut(w, self._on_add)
 
+    self.tx_custom_fields_frame = ctk.CTkFrame(action_row)
+    self.tx_custom_fields_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 10))
+    self.tx_custom_fields_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+    self._tx_custom_field_widgets = {}
+    self._refresh_tx_custom_fields_editor()
+
     # ---------------------------------------------------------
     # Transactions Table (ttk.Treeview) — gitea-like behavior
     # - Zebra striping using CTk theme colors
@@ -1879,8 +2066,10 @@ class InventoryApp(ctk.CTk):
     table_frame.grid_columnconfigure(0, weight=1)
     table_frame.grid_rowconfigure(1, weight=0)
 
+    all_custom_entries = self._get_all_custom_schema_in_display_order()
+    tx_custom_columns = [str(x.get("key") or "").strip() for x in all_custom_entries if str(x.get("key") or "").strip()]
     columns = [
-      "id", "date", "sku", "alias", "type", "qty",
+      "id", "date", "sku", "alias", *tx_custom_columns, "type", "qty",
       "purchase_unit_cost", "sale_unit_price",
       "purchase_total_cost", "prev_avg_cost",
       "onhand_qty", "avg_cost_after",
@@ -1940,6 +2129,8 @@ class InventoryApp(ctk.CTk):
       "gross_profit": "Gross Profit",
       "note": "Note",
     }
+    for c in tx_custom_columns:
+      headings[c] = c
 
     widths = {
       "id": 60, "date": 120, "sku": 200, "alias": 260, "type": 120, "qty": 80,
@@ -1949,6 +2140,8 @@ class InventoryApp(ctk.CTk):
       "cogs": 130, "onhand_cost": 155, "sales_rev": 140, "gross_profit": 180,
       "note": 380,
     }
+    for c in tx_custom_columns:
+      widths[c] = 150
 
     col_anchor = {
       "id": "center",
@@ -1969,6 +2162,10 @@ class InventoryApp(ctk.CTk):
       "gross_profit": "e",
       "note": "w",
     }
+    for entry in self._get_all_custom_schema_in_display_order():
+      key = str(entry.get("key") or "").strip()
+      if key:
+        col_anchor[key] = "center" if self._normalize_custom_type(entry.get("type")) == CUSTOM_TYPE_BOOLEAN else "w"
 
     head_anchor = {
       k: ("center" if v == "center" else ("e" if v == "e" else "w"))
@@ -2017,8 +2214,14 @@ class InventoryApp(ctk.CTk):
 
       avail = max(frame_w - sb_w - 6, 64)
 
-      stretch_cols = ("sku", "alias", "note")
-      fixed_cols = tuple(c for c in columns if c not in stretch_cols)
+      cur_columns = tuple(self.tx_tree["columns"] or columns)
+      dynamic_custom_cols = tuple(
+        str(x.get("key") or "").strip()
+        for x in self._get_all_custom_schema_in_display_order()
+        if str(x.get("key") or "").strip() in cur_columns
+      )
+      stretch_cols = tuple([c for c in ("sku", "alias", *dynamic_custom_cols, "note") if c in cur_columns])
+      fixed_cols = tuple(c for c in cur_columns if c not in stretch_cols)
 
       fixed_w = 0
       for c in fixed_cols:
@@ -2161,6 +2364,17 @@ class InventoryApp(ctk.CTk):
       "gross_profit": "Gross Profit: Sales Rev − COGS (for SALE rows).",
       "note": "Note: free text note for receipts/orders/etc.",
     }
+    for entry in self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS):
+      key = str(entry.get("key") or "").strip()
+      if not key:
+        continue
+      dtype = self._normalize_custom_type(entry.get("type"))
+      tip = f"{key}: alias custom field ({dtype})."
+      if dtype == CUSTOM_TYPE_ENUM:
+        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
+        if vals:
+          tip = f"{key}: alias enum field. Values: {vals}."
+      header_tooltips[key] = tip
 
     def _tree_on_hover(event) -> None:
       region = self.tx_tree.identify_region(event.x, event.y)
@@ -2508,6 +2722,17 @@ class InventoryApp(ctk.CTk):
       "sales_amount": "Sales Amount: sum of sales revenue in the month.",
       "cogs": "COGS: sum of cost-of-goods-sold in the month.",
     }
+    for entry in self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS):
+      key = str(entry.get("key") or "").strip()
+      if not key:
+        continue
+      dtype = self._normalize_custom_type(entry.get("type"))
+      tip = f"{key}: custom per-SKU field ({dtype})."
+      if dtype == CUSTOM_TYPE_ENUM:
+        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
+        if vals:
+          tip = f"{key}: custom per-SKU enum field. Values: {vals}."
+      header_tooltips[key] = tip
 
     def _tree_on_hover(event) -> None:
       region = self.ov_tree.identify_region(event.x, event.y)
@@ -2599,7 +2824,7 @@ class InventoryApp(ctk.CTk):
     self._configure_overview_tree_for_view()
 
   def _build_aliases_tab(self) -> None:
-    self.tab_alias.grid_rowconfigure(1, weight=1)
+    self.tab_alias.grid_rowconfigure(2, weight=1)
     self.tab_alias.grid_columnconfigure(0, weight=1)
 
     form = ctk.CTkFrame(self.tab_alias)
@@ -2643,9 +2868,16 @@ class InventoryApp(ctk.CTk):
     ]:
       bind_enter_shortcut(w, self._on_alias_add)
 
+    self.alias_custom_fields_wrapper = ctk.CTkFrame(self.tab_alias)
+    self.alias_custom_fields_wrapper.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+    self.alias_custom_fields_wrapper.grid_columnconfigure(0, weight=1)
+    self.alias_custom_fields_frame = ctk.CTkFrame(self.alias_custom_fields_wrapper)
+    self.alias_custom_fields_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 10))
+    self.alias_custom_fields_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
     # Table
     table_frame = ctk.CTkFrame(self.tab_alias)
-    table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
+    table_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(6, 10))
     table_frame.grid_rowconfigure(0, weight=1)
     table_frame.grid_columnconfigure(0, weight=1)
     table_frame.grid_rowconfigure(1, weight=0)
@@ -2759,6 +2991,18 @@ class InventoryApp(ctk.CTk):
       "sku": "SKU: the inventory identifier this alias maps to.",
       "name": "Name: friendly display name shown in tables and dropdowns.",
     }
+    for entry in self._get_all_custom_schema_in_display_order():
+      key = str(entry.get("key") or "").strip()
+      if not key:
+        continue
+      dtype = self._normalize_custom_type(entry.get("type"))
+      target = self._normalize_custom_target(entry.get("target"))
+      tip = f"{key}: {target} custom field ({dtype})."
+      if dtype == CUSTOM_TYPE_ENUM:
+        vals = ", ".join([str(x) for x in (entry.get("enum") or [])])
+        if vals:
+          tip = f"{key}: {target} enum field. Values: {vals}."
+      _alias_header_tooltips[key] = tip
 
     def _alias_on_hover(event) -> None:
       region = self.alias_tree.identify_region(event.x, event.y)
@@ -2841,6 +3085,166 @@ class InventoryApp(ctk.CTk):
       self._sync_alias_update_selected_state()
 
     self.alias_tree.bind("<<TreeviewSelect>>", _on_alias_tree_select)
+    self._alias_custom_field_widgets = {}
+    self._refresh_alias_custom_fields_editor()
+
+  def _build_custom_fields_tab(self) -> None:
+    self.tab_custom.grid_rowconfigure(1, weight=1)
+    self.tab_custom.grid_columnconfigure(0, weight=1)
+
+    schema_frame = ctk.CTkFrame(self.tab_custom)
+    schema_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+    schema_frame.grid_columnconfigure(1, weight=1)
+
+    ctk.CTkLabel(schema_frame, text="Field Name").grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
+    self.var_custom_schema_key = tk.StringVar(value="")
+    self.entry_custom_schema_key = ctk.CTkEntry(schema_frame, textvariable=self.var_custom_schema_key, width=220)
+    self.entry_custom_schema_key.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
+    apply_entry_shortcuts(self.entry_custom_schema_key)
+
+    ctk.CTkLabel(schema_frame, text="Target").grid(row=0, column=2, padx=(14, 6), pady=10, sticky="w")
+    self.var_custom_schema_target = tk.StringVar(value=CUSTOM_TARGET_ALIAS)
+    self.opt_custom_schema_target = ctk.CTkOptionMenu(
+      schema_frame,
+      values=list(CUSTOM_FIELD_TARGETS),
+      variable=self.var_custom_schema_target,
+      width=130,
+    )
+    self.opt_custom_schema_target.grid(row=0, column=3, padx=6, pady=10, sticky="w")
+
+    ctk.CTkLabel(schema_frame, text="Type").grid(row=0, column=4, padx=(14, 6), pady=10, sticky="w")
+    self.var_custom_schema_type = tk.StringVar(value=CUSTOM_TYPE_STRING)
+    self.opt_custom_schema_type = ctk.CTkOptionMenu(
+      schema_frame,
+      values=list(CUSTOM_FIELD_TYPES),
+      variable=self.var_custom_schema_type,
+      width=120,
+    )
+    self.opt_custom_schema_type.grid(row=0, column=5, padx=6, pady=10, sticky="w")
+
+    self.lbl_custom_schema_enum = ctk.CTkLabel(schema_frame, text="Enum Values")
+    self.lbl_custom_schema_enum.grid(row=0, column=6, padx=(14, 6), pady=10, sticky="w")
+    self.var_custom_schema_enum_input = tk.StringVar(value="")
+    self.entry_custom_schema_enum = ctk.CTkEntry(schema_frame, textvariable=self.var_custom_schema_enum_input, width=220)
+    self.entry_custom_schema_enum.grid(row=0, column=7, padx=6, pady=10, sticky="ew")
+    apply_entry_shortcuts(self.entry_custom_schema_enum)
+
+    self.enum_btns = ctk.CTkFrame(schema_frame, fg_color="transparent")
+    self.enum_btns.grid(row=0, column=8, padx=(6, 10), pady=10, sticky="w")
+    self.btn_custom_enum_add = ctk.CTkButton(self.enum_btns, text="Add Value", width=100, command=self._on_custom_schema_enum_add)
+    self.btn_custom_enum_add.grid(row=0, column=0, padx=4)
+    self.btn_custom_enum_remove = ctk.CTkButton(self.enum_btns, text="Remove", width=90, command=self._on_custom_schema_enum_remove_selected)
+    self.btn_custom_enum_remove.grid(row=0, column=1, padx=4)
+    self.btn_custom_enum_clear = ctk.CTkButton(self.enum_btns, text="Clear", width=80, command=self._on_custom_schema_enum_clear)
+    self.btn_custom_enum_clear.grid(row=0, column=2, padx=4)
+
+    self.enum_table_frame = ctk.CTkFrame(schema_frame)
+    self.enum_table_frame.grid(row=1, column=6, columnspan=3, rowspan=2, padx=(14, 10), pady=(0, 10), sticky="nsew")
+    self.enum_table_frame.grid_rowconfigure(0, weight=1)
+    self.enum_table_frame.grid_columnconfigure(0, weight=1)
+    self.custom_schema_enum_tree = ttk.Treeview(
+      self.enum_table_frame,
+      columns=["value"],
+      show="headings",
+      height=4,
+      selectmode="extended",
+      style="Treeview",
+    )
+    self.custom_schema_enum_tree.grid(row=0, column=0, sticky="nsew")
+    self.custom_schema_enum_tree.heading("value", text="Allowed Values", anchor="w")
+    self.custom_schema_enum_tree.column("value", width=260, minwidth=140, anchor="w", stretch=True)
+    self.custom_schema_enum_tree.tag_configure("odd",  background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"]))
+    self.custom_schema_enum_tree.tag_configure("even", background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]))
+    enum_vsb = ttk.Scrollbar(self.enum_table_frame, orient="vertical", command=self.custom_schema_enum_tree.yview, style="Dark.Vertical.TScrollbar")
+    self.custom_schema_enum_tree.configure(yscrollcommand=enum_vsb.set)
+    enum_vsb.grid(row=0, column=1, sticky="ns")
+    self._custom_schema_enum_values: List[str] = []
+
+    ctk.CTkLabel(schema_frame, text="Description (Tooltip)").grid(row=1, column=0, padx=(10, 6), pady=(0, 10), sticky="w")
+    self.var_custom_schema_description = tk.StringVar(value="")
+    self.entry_custom_schema_description = ctk.CTkEntry(schema_frame, textvariable=self.var_custom_schema_description)
+    self.entry_custom_schema_description.grid(row=1, column=1, columnspan=5, padx=6, pady=(0, 10), sticky="ew")
+    apply_entry_shortcuts(self.entry_custom_schema_description)
+
+    btns = ctk.CTkFrame(schema_frame, fg_color="transparent")
+    btns.grid(row=3, column=0, columnspan=9, padx=(12, 10), pady=(0, 10), sticky="e")
+
+    self.btn_custom_schema_add = ctk.CTkButton(btns, text="Add Field (Enter)", width=140, command=self._on_custom_schema_add)
+    self.btn_custom_schema_add.grid(row=0, column=0, padx=6)
+    self.btn_custom_schema_update = ctk.CTkButton(btns, text="Update Selected", width=150, command=self._on_custom_schema_update_selected)
+    self.btn_custom_schema_update.grid(row=0, column=1, padx=6)
+    self.btn_custom_schema_delete = ctk.CTkButton(
+      btns,
+      text="Delete Selected",
+      width=140,
+      fg_color="#8B2D2D",
+      hover_color="#A53636",
+      command=self._on_custom_schema_delete_selected,
+    )
+    self.btn_custom_schema_delete.grid(row=0, column=2, padx=6)
+    self.btn_custom_schema_up = ctk.CTkButton(btns, text="Move Up", width=100, command=lambda: self._move_selected_custom_schema(-1))
+    self.btn_custom_schema_up.grid(row=0, column=3, padx=6)
+    self.btn_custom_schema_down = ctk.CTkButton(btns, text="Move Down", width=110, command=lambda: self._move_selected_custom_schema(1))
+    self.btn_custom_schema_down.grid(row=0, column=4, padx=6)
+
+    def _sync_custom_schema_enum_state(*_args) -> None:
+      show = (self.var_custom_schema_type.get() or "").strip().lower() == CUSTOM_TYPE_ENUM
+      if show:
+        self.lbl_custom_schema_enum.grid()
+        self.entry_custom_schema_enum.grid()
+        self.enum_btns.grid()
+        self.enum_table_frame.grid()
+      else:
+        self.lbl_custom_schema_enum.grid_remove()
+        self.entry_custom_schema_enum.grid_remove()
+        self.enum_btns.grid_remove()
+        self.enum_table_frame.grid_remove()
+
+    self.opt_custom_schema_type.configure(command=lambda _v: _sync_custom_schema_enum_state())
+    _sync_custom_schema_enum_state()
+
+    for w in [self.entry_custom_schema_key, self.entry_custom_schema_enum, self.entry_custom_schema_description, self.btn_custom_schema_add, self.btn_custom_enum_add]:
+      bind_enter_shortcut(w, self._on_custom_schema_add)
+
+    schema_table_frame = ctk.CTkFrame(self.tab_custom)
+    schema_table_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+    schema_table_frame.grid_rowconfigure(0, weight=1)
+    schema_table_frame.grid_columnconfigure(0, weight=1)
+
+    self.custom_schema_tree = ttk.Treeview(
+      schema_table_frame,
+      columns=["key", "target", "type", "enum", "description"],
+      show="headings",
+      height=16,
+      selectmode="extended",
+      style="Treeview",
+    )
+    self.custom_schema_tree.grid(row=0, column=0, sticky="nsew")
+    schema_vsb = ttk.Scrollbar(schema_table_frame, orient="vertical", command=self.custom_schema_tree.yview, style="Dark.Vertical.TScrollbar")
+    schema_hsb = ttk.Scrollbar(schema_table_frame, orient="horizontal", command=self.custom_schema_tree.xview, style="Dark.Horizontal.TScrollbar")
+    self.custom_schema_tree.configure(yscrollcommand=schema_vsb.set, xscrollcommand=schema_hsb.set)
+    schema_vsb.grid(row=0, column=1, sticky="ns")
+    schema_hsb.grid(row=1, column=0, sticky="ew")
+    self.custom_schema_tree.tag_configure("odd",  background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"]))
+    self.custom_schema_tree.tag_configure("even", background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]))
+    self.custom_schema_tree.heading("key", text="Field Name  ", anchor="w")
+    self.custom_schema_tree.heading("target", text="Target  ", anchor="w")
+    self.custom_schema_tree.heading("type", text="Type  ", anchor="w")
+    self.custom_schema_tree.heading("enum", text="Enum Values  ", anchor="w")
+    self.custom_schema_tree.heading("description", text="Description", anchor="w")
+    self.custom_schema_tree.column("key", width=280, minwidth=120, anchor="w", stretch=True)
+    self.custom_schema_tree.column("target", width=140, minwidth=100, anchor="w", stretch=False)
+    self.custom_schema_tree.column("type", width=120, minwidth=80, anchor="w", stretch=False)
+    self.custom_schema_tree.column("enum", width=260, minwidth=140, anchor="w", stretch=True)
+    self.custom_schema_tree.column("description", width=420, minwidth=180, anchor="w", stretch=True)
+
+    def _on_schema_select(_e=None) -> None:
+      self._load_selected_custom_schema_into_form()
+      self._sync_custom_schema_update_selected_state()
+
+    self.custom_schema_tree.bind("<<TreeviewSelect>>", _on_schema_select)
+    self._refresh_custom_schema_ui()
+
 
 
   def _on_pick_date(self) -> None:
@@ -2905,6 +3309,8 @@ class InventoryApp(ctk.CTk):
     self.transactions = []
     self.aliases_list = []
     self._rebuild_alias_map()
+    self.custom_fields_schema = []
+    self._rebuild_custom_field_schema_map()
     self.next_id = 1
     self.next_created_order = 1
     self._set_tx_controls_enabled(False)
@@ -2999,6 +3405,58 @@ class InventoryApp(ctk.CTk):
         continue
       try:
         b.configure(state=state_btn)
+      except Exception:
+        pass
+
+    # Custom Fields tab controls
+    for w in [
+      getattr(self, "entry_custom_schema_key", None),
+      getattr(self, "entry_custom_schema_enum", None),
+    ]:
+      if w is None:
+        continue
+      try:
+        w.configure(state=state_entry)
+      except Exception:
+        pass
+
+    for w in [getattr(self, "opt_custom_schema_target", None), getattr(self, "opt_custom_schema_type", None)]:
+      if w is None:
+        continue
+      try:
+        w.configure(state=state_btn)
+      except Exception:
+        pass
+
+    for b in [
+      getattr(self, "btn_custom_schema_add", None),
+      getattr(self, "btn_custom_schema_update", None),
+      getattr(self, "btn_custom_schema_delete", None),
+      getattr(self, "btn_custom_schema_up", None),
+      getattr(self, "btn_custom_schema_down", None),
+    ]:
+      if b is None:
+        continue
+      try:
+        b.configure(state=state_btn)
+      except Exception:
+        pass
+
+    for meta in list(getattr(self, "_tx_custom_field_widgets", {}).values()):
+      widget = meta.get("widget") if isinstance(meta, dict) else None
+      if widget is None:
+        continue
+      try:
+        widget.configure(state=state_entry)
+      except Exception:
+        pass
+
+    for meta in list(getattr(self, "_alias_custom_field_widgets", {}).values()):
+      widget = meta.get("widget") if isinstance(meta, dict) else None
+      if widget is None:
+        continue
+      try:
+        widget.configure(state=state_entry)
       except Exception:
         pass
 
@@ -3121,7 +3579,22 @@ class InventoryApp(ctk.CTk):
     if not hasattr(self, "alias_tree"):
       return
 
+    alias_schema = self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS)
+    columns = ["sku", "name"] + [str(x.get("key") or "").strip() for x in alias_schema if str(x.get("key") or "").strip()]
     try:
+      self.alias_tree["columns"] = columns
+      self.alias_tree.heading("sku", text="SKU  ", anchor="w")
+      self.alias_tree.heading("name", text=("Name  " if len(columns) > 2 else "Name"), anchor="w")
+      self.alias_tree.column("sku", width=240, minwidth=80, anchor="w", stretch=False)
+      self.alias_tree.column("name", width=300, minwidth=120, anchor="w", stretch=True)
+      for idx, entry in enumerate(alias_schema):
+        key = str(entry.get("key") or "").strip()
+        if not key:
+          continue
+        gutter = "  " if idx < (len(alias_schema) - 1) else ""
+        anchor = "center" if self._normalize_custom_type(entry.get("type")) == CUSTOM_TYPE_BOOLEAN else "w"
+        self.alias_tree.heading(key, text=f"{key}{gutter}", anchor=("center" if anchor == "center" else "w"))
+        self.alias_tree.column(key, width=150, minwidth=90, anchor=anchor, stretch=True)
       self.alias_tree.delete(*self.alias_tree.get_children())
     except Exception:
       return
@@ -3135,7 +3608,12 @@ class InventoryApp(ctk.CTk):
       if not sku or not name:
         continue
       pad_l = "  "
-      values = (f"{pad_l}{sku}", f"{pad_l}{name}")
+      custom_values = dict(a.get("custom_fields") or {})
+      values_list: List[Any] = [f"{pad_l}{sku}", f"{pad_l}{name}"]
+      for entry in alias_schema:
+        key = str(entry.get("key") or "").strip()
+        values_list.append(self._format_custom_field_value(entry, custom_values.get(key, None)))
+      values = tuple(values_list)
       tag = "even" if (i % 2) == 0 else "odd"
       self.alias_tree.insert("", "end", iid=sku, values=values, tags=(tag,))
 
@@ -3144,6 +3622,7 @@ class InventoryApp(ctk.CTk):
       self._sync_alias_update_selected_state()
     except Exception:
       pass
+    self._update_alias_custom_fields_editor_values(next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == self._get_selected_alias_sku()), None))
 
   def _get_selected_alias_skus(self) -> List[str]:
     """
@@ -3175,34 +3654,39 @@ class InventoryApp(ctk.CTk):
     sku = self._get_selected_alias_sku()
     if not sku:
       return
+    alias_item = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == sku), None)
     name = self._get_alias_for_sku(sku)
     self.var_alias_sku.set(sku)
     self.var_alias_name.set(name)
+    self._update_alias_custom_fields_editor_values(alias_item)
 
-  def _read_alias_form(self) -> Tuple[str, str]:
+  def _read_alias_form(self) -> Tuple[str, str, Dict[str, Any]]:
     sku = str(self.var_alias_sku.get() or "").strip()
     name = str(self.var_alias_name.get() or "").strip()
     if not sku:
       raise ValueError("Alias SKU is required")
     if not name:
       raise ValueError("Alias Name is required")
-    return sku, name
+    custom_fields = self._read_target_custom_field_form("_alias_custom_field_widgets")
+    return sku, name, custom_fields
 
-  def _upsert_alias(self, sku: str, name: str) -> None:
+  def _upsert_alias(self, sku: str, name: str, custom_fields: Optional[Dict[str, Any]] = None) -> None:
     sku = str(sku or "").strip()
     name = str(name or "").strip()
     if not sku or not name:
       return
+    custom_map = dict(custom_fields or {})
 
     found = False
     for a in self.aliases_list:
       if str(a.get("sku") or "").strip() == sku:
         a["name"] = name
+        a["custom_fields"] = custom_map
         found = True
         break
 
     if not found:
-      self.aliases_list.append({"sku": sku, "name": name})
+      self.aliases_list.append({"sku": sku, "name": name, "custom_fields": custom_map})
 
     self.aliases_list.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
 
@@ -3211,12 +3695,12 @@ class InventoryApp(ctk.CTk):
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     try:
-      sku, name = self._read_alias_form()
+      sku, name, custom_fields = self._read_alias_form()
     except Exception as e:
       messagebox.showerror("Invalid", str(e))
       return
 
-    self._upsert_alias(sku, name)
+    self._upsert_alias(sku, name, custom_fields)
     self._save_and_refresh()
     try:
       if hasattr(self, "alias_tree") and self.alias_tree.exists(sku):
@@ -3347,9 +3831,10 @@ class InventoryApp(ctk.CTk):
       return
 
     sel_sku = skus[0]
+    sel_alias = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == sel_sku), None)
 
     try:
-      sku, name = self._read_alias_form()
+      sku, name, custom_fields = self._read_alias_form()
     except Exception as e:
       messagebox.showerror("Invalid", str(e))
       return
@@ -3360,7 +3845,9 @@ class InventoryApp(ctk.CTk):
       for tx in self.transactions:
         if str(tx.sku or "").strip() == sel_sku:
           tx.sku = sku
-    self._upsert_alias(sku, name)
+    elif sel_alias is not None and not custom_fields:
+      custom_fields = dict(sel_alias.get("custom_fields") or {})
+    self._upsert_alias(sku, name, custom_fields)
 
     self._save_and_refresh()
     try:
@@ -3371,6 +3858,527 @@ class InventoryApp(ctk.CTk):
     except Exception:
       pass
     Log.ok(self.LOG_TAG, "Updated alias.", {"sku": sel_sku, "new_sku": sku})
+
+  # -----------------------------------------------------------------------------
+  # Custom Fields
+  # -----------------------------------------------------------------------------
+
+  def _get_custom_schema_for_target(self, target: str) -> List[Dict[str, Any]]:
+    target_norm = self._normalize_custom_target(target)
+    return [dict(x) for x in (self.custom_fields_schema or []) if self._normalize_custom_target(x.get("target")) == target_norm]
+
+  def _get_all_custom_schema_in_display_order(self) -> List[Dict[str, Any]]:
+    return [dict(x) for x in (self.custom_fields_schema or []) if str(x.get("key") or "").strip()]
+
+  def _get_transaction_custom_value_for_overview(self, sku: str, key: str) -> Any:
+    sku_s = str(sku or "").strip()
+    key_s = str(key or "").strip()
+    if not sku_s or not key_s:
+      return None
+    for tx in sorted(self.transactions or [], key=lambda t: (t.date, t.created_order, t.id), reverse=True):
+      if str(getattr(tx, "sku", "") or "").strip() != sku_s:
+        continue
+      custom_fields = dict(getattr(tx, "custom_fields", {}) or {})
+      if key_s in custom_fields:
+        return custom_fields.get(key_s)
+    return None
+
+  def _rebuild_custom_field_schema_map(self) -> None:
+    self._custom_field_schema_map = {
+      str(x.get("key") or "").strip(): x
+      for x in (self.custom_fields_schema or [])
+      if str(x.get("key") or "").strip()
+    }
+
+  def _parse_custom_schema_enum_input(self, raw: str) -> List[str]:
+    return self._normalize_enum_values([x.strip() for x in str(raw or "").split(",")])
+
+  def _refresh_custom_schema_enum_tree(self) -> None:
+    if not hasattr(self, "custom_schema_enum_tree"):
+      return
+    try:
+      self.custom_schema_enum_tree.delete(*self.custom_schema_enum_tree.get_children())
+    except Exception:
+      return
+    for i, value in enumerate(self._custom_schema_enum_values or []):
+      tag = "even" if (i % 2) == 0 else "odd"
+      self.custom_schema_enum_tree.insert("", "end", iid=f"enum_{i}", values=(value,), tags=(tag,))
+
+  def _on_custom_schema_enum_add(self) -> None:
+    raw = str(getattr(self, "var_custom_schema_enum_input", tk.StringVar(value="")).get() or "").strip()
+    values = self._parse_custom_schema_enum_input(raw)
+    if not values:
+      return
+    cur = list(getattr(self, "_custom_schema_enum_values", []) or [])
+    seen = set(cur)
+    for value in values:
+      if value not in seen:
+        seen.add(value)
+        cur.append(value)
+    self._custom_schema_enum_values = cur
+    self._refresh_custom_schema_enum_tree()
+    try:
+      self.var_custom_schema_enum_input.set("")
+      self.entry_custom_schema_enum.focus_set()
+    except Exception:
+      pass
+
+  def _on_custom_schema_enum_remove_selected(self) -> None:
+    if not hasattr(self, "custom_schema_enum_tree"):
+      return
+    selected = list(self.custom_schema_enum_tree.selection() or [])
+    if not selected:
+      return
+    keep: List[str] = []
+    remove_idx = set()
+    for iid in selected:
+      try:
+        remove_idx.add(int(str(iid).split("_")[-1]))
+      except Exception:
+        pass
+    for i, value in enumerate(list(getattr(self, "_custom_schema_enum_values", []) or [])):
+      if i not in remove_idx:
+        keep.append(value)
+    self._custom_schema_enum_values = keep
+    self._refresh_custom_schema_enum_tree()
+
+  def _on_custom_schema_enum_clear(self) -> None:
+    self._custom_schema_enum_values = []
+    self._refresh_custom_schema_enum_tree()
+
+  def _read_custom_schema_form(self) -> Dict[str, Any]:
+    key = str(self.var_custom_schema_key.get() or "").strip()
+    if not key:
+      raise ValueError("Field Name is required")
+    target = self._normalize_custom_target(self.var_custom_schema_target.get())
+    dtype = self._normalize_custom_type(self.var_custom_schema_type.get())
+    description = str(self.var_custom_schema_description.get() or "").strip()
+    enum_vals = list(getattr(self, "_custom_schema_enum_values", []) or []) if dtype == CUSTOM_TYPE_ENUM else []
+    if dtype == CUSTOM_TYPE_ENUM and not enum_vals:
+      raise ValueError("Enum fields require at least one enum value")
+    return {"key": key, "target": target, "type": dtype, "description": description, "enum": enum_vals}
+
+  def _get_selected_custom_schema_keys(self) -> List[str]:
+    if not hasattr(self, "custom_schema_tree"):
+      return []
+    out: List[str] = []
+    for iid in (self.custom_schema_tree.selection() or []):
+      key = str(iid or "").strip()
+      if key:
+        out.append(key)
+    return sorted(set(out), key=lambda x: x.lower())
+
+  def _load_selected_custom_schema_into_form(self) -> None:
+    keys = self._get_selected_custom_schema_keys()
+    if len(keys) != 1:
+      return
+    entry = dict(self._custom_field_schema_map.get(keys[0]) or {})
+    self.var_custom_schema_key.set(str(entry.get("key") or ""))
+    self.var_custom_schema_target.set(self._normalize_custom_target(entry.get("target")))
+    self.var_custom_schema_type.set(self._normalize_custom_type(entry.get("type")))
+    self.var_custom_schema_description.set(str(entry.get("description") or ""))
+    self._custom_schema_enum_values = [str(x) for x in (entry.get("enum") or []) if str(x).strip()]
+    self._refresh_custom_schema_enum_tree()
+    try:
+      self.var_custom_schema_enum_input.set("")
+    except Exception:
+      pass
+    if hasattr(self, "opt_custom_schema_target"):
+      try:
+        self.opt_custom_schema_target.set(self.var_custom_schema_target.get())
+      except Exception:
+        pass
+    if hasattr(self, "opt_custom_schema_type"):
+      try:
+        self.opt_custom_schema_type.set(self.var_custom_schema_type.get())
+      except Exception:
+        pass
+
+  def _sync_custom_schema_update_selected_state(self) -> None:
+    has_project = bool(self.project_data_path)
+    sel_count = len(self._get_selected_custom_schema_keys())
+    self._set_ctk_button_enabled(getattr(self, "btn_custom_schema_update", None), bool(has_project and sel_count == 1))
+    self._set_ctk_button_enabled(getattr(self, "btn_custom_schema_delete", None), bool(has_project and sel_count >= 1))
+    self._set_ctk_button_enabled(getattr(self, "btn_custom_schema_up", None), bool(has_project and sel_count == 1))
+    self._set_ctk_button_enabled(getattr(self, "btn_custom_schema_down", None), bool(has_project and sel_count == 1))
+
+  def _move_selected_custom_schema(self, direction: int) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    keys = self._get_selected_custom_schema_keys()
+    if len(keys) != 1:
+      messagebox.showinfo("Reorder", "Select exactly one custom field row first.")
+      return
+    key = keys[0]
+    idx = next((i for i, entry in enumerate(self.custom_fields_schema or []) if str(entry.get("key") or "").strip() == key), -1)
+    if idx < 0:
+      return
+    new_idx = idx + int(direction)
+    if new_idx < 0 or new_idx >= len(self.custom_fields_schema):
+      return
+    items = list(self.custom_fields_schema or [])
+    items[idx], items[new_idx] = items[new_idx], items[idx]
+    self.custom_fields_schema = items
+    self._save_and_refresh(schema_changed=True)
+    try:
+      self.custom_schema_tree.selection_set(key)
+      self.custom_schema_tree.focus(key)
+      self.custom_schema_tree.see(key)
+    except Exception:
+      pass
+
+  def _upsert_custom_schema_entry(self, entry: Dict[str, Any], *, replacing_key: Optional[str] = None) -> None:
+    new_key = str(entry.get("key") or "").strip()
+    if not new_key:
+      return
+    replacing = str(replacing_key or "").strip()
+    new_items: List[Dict[str, Any]] = []
+    found = False
+    for item in (self.custom_fields_schema or []):
+      item_key = str(item.get("key") or "").strip()
+      if not item_key:
+        continue
+      if item_key.lower() == new_key.lower() and item_key != replacing:
+        raise ValueError(f"Custom field already exists: {new_key}")
+      if replacing and item_key == replacing:
+        new_items.append(dict(entry))
+        found = True
+      elif item_key != replacing:
+        new_items.append(dict(item))
+    if not found:
+      for item in new_items:
+        if str(item.get("key") or "").strip().lower() == new_key.lower():
+          raise ValueError(f"Custom field already exists: {new_key}")
+      new_items.append(dict(entry))
+    self.custom_fields_schema = new_items
+    self._rebuild_custom_field_schema_map()
+
+  def _rename_custom_schema_key_in_values(self, old_key: str, new_key: str, *, target: str) -> None:
+    if old_key == new_key:
+      return
+    target_norm = self._normalize_custom_target(target)
+    if target_norm == CUSTOM_TARGET_TRANSACTION:
+      for tx in (self.transactions or []):
+        custom_fields = dict(getattr(tx, "custom_fields", {}) or {})
+        if old_key in custom_fields:
+          custom_fields[new_key] = custom_fields.pop(old_key)
+          tx.custom_fields = custom_fields
+      return
+    for alias in (self.aliases_list or []):
+      custom_fields = dict(alias.get("custom_fields") or {})
+      if old_key in custom_fields:
+        custom_fields[new_key] = custom_fields.pop(old_key)
+        alias["custom_fields"] = custom_fields
+
+  def _remove_custom_schema_keys_from_values(self, keys: List[str], *, target: str) -> None:
+    key_set = {str(k or "").strip() for k in (keys or []) if str(k or "").strip()}
+    if not key_set:
+      return
+    if self._normalize_custom_target(target) == CUSTOM_TARGET_TRANSACTION:
+      for tx in (self.transactions or []):
+        custom_fields = dict(getattr(tx, "custom_fields", {}) or {})
+        for key in key_set:
+          custom_fields.pop(key, None)
+        tx.custom_fields = custom_fields
+      return
+    for alias in (self.aliases_list or []):
+      custom_fields = dict(alias.get("custom_fields") or {})
+      for key in key_set:
+        custom_fields.pop(key, None)
+      alias["custom_fields"] = custom_fields
+
+  def _coerce_custom_field_value(self, schema_entry: Dict[str, Any], raw: Any, *, raise_on_error: bool = True) -> Any:
+    dtype = self._normalize_custom_type(schema_entry.get("type"))
+    if dtype == CUSTOM_TYPE_BOOLEAN:
+      if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("", "0", "false", "no", "off", "n"):
+          return False
+        if s in ("1", "true", "yes", "on", "y"):
+          return True
+      return bool(raw)
+
+    if raw is None:
+      return None
+
+    if dtype == CUSTOM_TYPE_NUMBER:
+      s = str(raw).strip()
+      if not s:
+        return None
+      try:
+        return float(s)
+      except Exception:
+        if raise_on_error:
+          raise ValueError(f"{schema_entry.get('key')}: number is invalid")
+        return None
+
+    if dtype == CUSTOM_TYPE_ENUM:
+      s = str(raw or "").strip()
+      if not s:
+        return None
+      enum_vals = self._normalize_enum_values(schema_entry.get("enum", []))
+      if enum_vals and s not in enum_vals:
+        if raise_on_error:
+          raise ValueError(f"{schema_entry.get('key')}: value must be one of {', '.join(enum_vals)}")
+        return None
+      return s
+
+    s = str(raw or "")
+    return s if s != "" else None
+
+  def _format_custom_field_value(self, schema_entry: Dict[str, Any], value: Any) -> str:
+    if value is None:
+      return ""
+    dtype = self._normalize_custom_type(schema_entry.get("type"))
+    if dtype == CUSTOM_TYPE_BOOLEAN:
+      return "Yes" if bool(value) else "No"
+    if dtype == CUSTOM_TYPE_NUMBER:
+      try:
+        num = float(value)
+      except Exception:
+        return str(value)
+      return str(int(num)) if num.is_integer() else f"{num:g}"
+    return str(value)
+
+  def _get_entity_custom_values(self, entity: Any) -> Dict[str, Any]:
+    raw = getattr(entity, "custom_fields", None) if hasattr(entity, "custom_fields") else None
+    if raw is None and isinstance(entity, dict):
+      raw = entity.get("custom_fields")
+    return dict(raw or {}) if isinstance(raw, dict) else {}
+
+  def _build_target_custom_field_editor(self, parent: Any, *, target: str, widgets_attr: str, source: Any = None) -> None:
+    try:
+      for child in parent.winfo_children():
+        child.destroy()
+    except Exception:
+      pass
+    widgets: Dict[str, Dict[str, Any]] = {}
+    schema_entries = self._get_custom_schema_for_target(target)
+    current_values = self._get_entity_custom_values(source)
+    if not schema_entries:
+      setattr(self, widgets_attr, widgets)
+      ctk.CTkLabel(parent, text=f"No {target} custom fields defined.").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+      return
+    try:
+      for col in range(4):
+        parent.grid_columnconfigure(col, weight=1)
+    except Exception:
+      pass
+    for i, entry in enumerate(schema_entries):
+      row = int(i / 4)
+      col = int(i % 4)
+      key = str(entry.get("key") or "").strip()
+      dtype = self._normalize_custom_type(entry.get("type"))
+      desc = str(entry.get("description") or "").strip()
+      cell = ctk.CTkFrame(parent, fg_color="transparent")
+      cell.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+      try:
+        cell.grid_columnconfigure(1, weight=1)
+      except Exception:
+        pass
+      lbl = ctk.CTkLabel(cell, text=key)
+      lbl.grid(row=0, column=0, padx=(4, 8), pady=4, sticky="w")
+      existing = current_values.get(key, None)
+      if dtype == CUSTOM_TYPE_BOOLEAN:
+        var = tk.BooleanVar(value=bool(existing))
+        widget = ctk.CTkCheckBox(cell, text="", variable=var, onvalue=True, offvalue=False)
+        widget.grid(row=0, column=1, padx=4, pady=4, sticky="w")
+      elif dtype == CUSTOM_TYPE_ENUM:
+        values = [""] + [v for v in self._normalize_enum_values(entry.get("enum", [])) if str(v) != ""]
+        current = str(existing if existing is not None else "")
+        if current and current not in values:
+          values.append(current)
+        var = tk.StringVar(value=current)
+        widget = ctk.CTkOptionMenu(cell, values=values, variable=var, width=220)
+        widget.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+      else:
+        var = tk.StringVar(value="" if existing is None else self._format_custom_field_value(entry, existing))
+        widget = ctk.CTkEntry(cell, textvariable=var, width=220)
+        widget.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        apply_entry_shortcuts(widget)
+      if desc:
+        tooltip(lbl, widget, text=desc)
+      else:
+        clear_tooltip(lbl, widget)
+      widgets[key] = {"var": var, "widget": widget, "schema": dict(entry)}
+    setattr(self, widgets_attr, widgets)
+
+  def _read_target_custom_field_form(self, widgets_attr: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, meta in dict(getattr(self, widgets_attr, {}) or {}).items():
+      schema = dict(meta.get("schema") or {})
+      var = meta.get("var")
+      raw = var.get() if var is not None and hasattr(var, "get") else None
+      value = self._coerce_custom_field_value(schema, raw, raise_on_error=True)
+      if value is not None:
+        out[key] = value
+    return out
+
+  def _set_target_custom_field_editor_values(self, widgets_attr: str, source: Any = None) -> None:
+    current_values = self._get_entity_custom_values(source)
+    for key, meta in dict(getattr(self, widgets_attr, {}) or {}).items():
+      schema = dict(meta.get("schema") or {})
+      dtype = self._normalize_custom_type(schema.get("type"))
+      var = meta.get("var")
+      widget = meta.get("widget")
+      if var is None or not hasattr(var, "set"):
+        continue
+      value = current_values.get(key, None)
+      if dtype == CUSTOM_TYPE_BOOLEAN:
+        var.set(bool(value))
+      elif dtype == CUSTOM_TYPE_ENUM:
+        current = "" if value is None else str(value)
+        if widget is not None and hasattr(widget, "configure"):
+          values = [""] + [v for v in self._normalize_enum_values(schema.get("enum", [])) if str(v) != ""]
+          if current and current not in values:
+            values.append(current)
+          try:
+            widget.configure(values=values)
+          except Exception:
+            pass
+        var.set(current)
+      else:
+        var.set("" if value is None else self._format_custom_field_value(schema, value))
+
+  def _refresh_tx_custom_fields_editor(self, tx: Optional[Transaction] = None) -> None:
+    if hasattr(self, "tx_custom_fields_frame"):
+      self._build_target_custom_field_editor(
+        self.tx_custom_fields_frame,
+        target=CUSTOM_TARGET_TRANSACTION,
+        widgets_attr="_tx_custom_field_widgets",
+        source=tx,
+      )
+
+  def _update_tx_custom_fields_editor_values(self, tx: Optional[Transaction] = None) -> None:
+    self._set_target_custom_field_editor_values("_tx_custom_field_widgets", tx)
+
+  def _refresh_alias_custom_fields_editor(self, alias_item: Optional[Dict[str, Any]] = None) -> None:
+    if hasattr(self, "alias_custom_fields_frame"):
+      self._build_target_custom_field_editor(
+        self.alias_custom_fields_frame,
+        target=CUSTOM_TARGET_ALIAS,
+        widgets_attr="_alias_custom_field_widgets",
+        source=alias_item,
+      )
+
+  def _update_alias_custom_fields_editor_values(self, alias_item: Optional[Dict[str, Any]] = None) -> None:
+    self._set_target_custom_field_editor_values("_alias_custom_field_widgets", alias_item)
+
+  def _refresh_custom_schema_ui(self) -> None:
+    self._rebuild_custom_field_schema_map()
+    if hasattr(self, "custom_schema_tree"):
+      try:
+        self.custom_schema_tree.delete(*self.custom_schema_tree.get_children())
+      except Exception:
+        pass
+      for i, entry in enumerate(self.custom_fields_schema or []):
+        key = str(entry.get("key") or "").strip()
+        values = (
+          f"  {key}",
+          self._normalize_custom_target(entry.get("target")),
+          self._normalize_custom_type(entry.get("type")),
+          ", ".join([str(x) for x in (entry.get("enum") or [])]),
+          str(entry.get("description") or ""),
+        )
+        tag = "even" if (i % 2) == 0 else "odd"
+        self.custom_schema_tree.insert("", "end", iid=key, values=values, tags=(tag,))
+    self._refresh_tx_custom_fields_editor()
+    self._refresh_alias_custom_fields_editor()
+    self._sync_custom_schema_update_selected_state()
+
+  def _on_custom_schema_add(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    try:
+      entry = self._read_custom_schema_form()
+      self._upsert_custom_schema_entry(entry)
+    except Exception as e:
+      messagebox.showerror("Invalid", str(e))
+      return
+    self._save_and_refresh(schema_changed=True)
+    try:
+      self.custom_schema_tree.selection_set(entry["key"])
+      self.custom_schema_tree.focus(entry["key"])
+      self.custom_schema_tree.see(entry["key"])
+    except Exception:
+      pass
+
+  def _on_custom_schema_update_selected(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    keys = self._get_selected_custom_schema_keys()
+    if not keys:
+      messagebox.showinfo("Update", "Select a custom field row first.")
+      return
+    if len(keys) != 1:
+      messagebox.showwarning("Update", "Please select exactly ONE custom field row to update.")
+      return
+    old_key = keys[0]
+    old_entry = dict(self._custom_field_schema_map.get(old_key) or {})
+    try:
+      entry = self._read_custom_schema_form()
+      self._upsert_custom_schema_entry(entry, replacing_key=old_key)
+      self._rename_custom_schema_key_in_values(old_key, entry["key"], target=old_entry.get("target"))
+      if self._normalize_custom_type(entry.get("type")) != self._normalize_custom_type(old_entry.get("type")):
+        self._remove_custom_schema_keys_from_values([entry["key"]], target=entry.get("target"))
+      elif self._normalize_custom_target(entry.get("target")) != self._normalize_custom_target(old_entry.get("target")):
+        self._remove_custom_schema_keys_from_values([entry["key"]], target=old_entry.get("target"))
+      elif self._normalize_custom_type(entry.get("type")) == CUSTOM_TYPE_ENUM:
+        enum_set = set(self._normalize_enum_values(entry.get("enum", [])))
+        if self._normalize_custom_target(entry.get("target")) == CUSTOM_TARGET_TRANSACTION:
+          for tx in (self.transactions or []):
+            values = dict(getattr(tx, "custom_fields", {}) or {})
+            cur = values.get(entry["key"], None)
+            if cur is not None and enum_set and str(cur) not in enum_set:
+              values.pop(entry["key"], None)
+              tx.custom_fields = values
+        else:
+          for alias in (self.aliases_list or []):
+            values = dict(alias.get("custom_fields") or {})
+            cur = values.get(entry["key"], None)
+            if cur is not None and enum_set and str(cur) not in enum_set:
+              values.pop(entry["key"], None)
+              alias["custom_fields"] = values
+    except Exception as e:
+      messagebox.showerror("Invalid", str(e))
+      return
+    self._save_and_refresh(schema_changed=True)
+    try:
+      self.custom_schema_tree.selection_set(entry["key"])
+      self.custom_schema_tree.focus(entry["key"])
+      self.custom_schema_tree.see(entry["key"])
+    except Exception:
+      pass
+
+  def _on_custom_schema_delete_selected(self) -> None:
+    if not self.project_data_path:
+      messagebox.showerror("Project", "Select a Project Directory first.")
+      return
+    keys = self._get_selected_custom_schema_keys()
+    if not keys:
+      messagebox.showinfo("Delete", "Select one or more custom field rows first.")
+      return
+    preview = ", ".join(keys[:8])
+    if len(keys) > 8:
+      preview += f", ... (+{len(keys) - 8} more)"
+    if not messagebox.askyesno("Delete Custom Field", f"Delete {len(keys)} selected custom field(s)?\n\nFields: {preview}"):
+      return
+    entries = [dict(self._custom_field_schema_map.get(k) or {}) for k in keys]
+    self.custom_fields_schema = [x for x in (self.custom_fields_schema or []) if str(x.get("key") or "").strip() not in set(keys)]
+    for entry in entries:
+      if str(entry.get("key") or "").strip():
+        self._remove_custom_schema_keys_from_values([str(entry.get("key") or "").strip()], target=entry.get("target"))
+    self._save_and_refresh(schema_changed=True)
+    self.var_custom_schema_key.set("")
+    self.var_custom_schema_enum_input.set("")
+    self._custom_schema_enum_values = []
+    self._refresh_custom_schema_enum_tree()
+    self.var_custom_schema_description.set("")
+    self.var_custom_schema_target.set(CUSTOM_TARGET_ALIAS)
+    self.var_custom_schema_type.set(CUSTOM_TYPE_STRING)
 
   def _on_delete_selected(self) -> None:
     if not self.project_data_path:
@@ -3394,7 +4402,7 @@ class InventoryApp(ctk.CTk):
     self.transactions = [t for t in self.transactions if t.id not in id_set]
     after = len(self.transactions)
 
-    self._save_and_refresh()
+    self._save_and_refresh(schema_changed=True)
     Log.warn(self.LOG_TAG, "Deleted transactions.", {"count": (before - after), "ids": ids})
 
   def _load_selected_into_form(self) -> None:
@@ -3422,6 +4430,7 @@ class InventoryApp(ctk.CTk):
     self.var_note.set(tx.note or "")
     self._sync_type_fields()
     self._sync_alias_choice_from_sku()
+    self._update_tx_custom_fields_editor_values(tx)
 
   def _read_form_to_transaction(self, existing_id: Optional[int]) -> Transaction:
     date = parse_date(self.var_date.get())
@@ -3459,6 +4468,7 @@ class InventoryApp(ctk.CTk):
         raise ValueError("Sale Unit Price must be >= 0")
 
     note = (self.var_note.get() or "").strip()
+    custom_fields = self._read_target_custom_field_form("_tx_custom_field_widgets")
 
     if existing_id is None:
       tx_id = self.next_id
@@ -3479,6 +4489,7 @@ class InventoryApp(ctk.CTk):
       sale_unit_price=sale_unit,
       note=note,
       created_order=created_order,
+      custom_fields=custom_fields,
     )
 
   # -----------------------------------------------------------------------------
@@ -3501,6 +4512,78 @@ class InventoryApp(ctk.CTk):
     except Exception:
       pass
 
+    all_custom_entries = self._get_all_custom_schema_in_display_order()
+    tx_custom_columns = [str(x.get("key") or "").strip() for x in all_custom_entries if str(x.get("key") or "").strip()]
+    columns = [
+      "id", "date", "sku", "alias", *tx_custom_columns, "type", "qty",
+      "purchase_unit_cost", "sale_unit_price",
+      "purchase_total_cost", "prev_avg_cost",
+      "onhand_qty", "avg_cost_after",
+      "cogs", "onhand_cost", "sales_rev", "gross_profit",
+      "note",
+    ]
+    headings = {
+      "id": "ID",
+      "date": "Date",
+      "sku": "SKU",
+      "alias": "Alias",
+      "type": "Type",
+      "qty": "Qty",
+      "purchase_unit_cost": "Purchase Unit Cost",
+      "sale_unit_price": "Sale Unit Price",
+      "purchase_total_cost": "Purchase Total Cost",
+      "prev_avg_cost": "Prev Avg Cost",
+      "onhand_qty": "OnHand Qty",
+      "avg_cost_after": "Avg Cost",
+      "cogs": "COGS",
+      "onhand_cost": "OnHand Cost",
+      "sales_rev": "Sales Rev",
+      "gross_profit": "Gross Profit",
+      "note": "Note",
+    }
+    widths = {
+      "id": 60, "date": 120, "sku": 200, "alias": 260, "type": 120, "qty": 80,
+      "purchase_unit_cost": 165, "sale_unit_price": 145,
+      "purchase_total_cost": 175, "prev_avg_cost": 145,
+      "onhand_qty": 120, "avg_cost_after": 130,
+      "cogs": 130, "onhand_cost": 155, "sales_rev": 140, "gross_profit": 180,
+      "note": 380,
+    }
+    col_anchor = {
+      "id": "center",
+      "date": "w",
+      "sku": "w",
+      "alias": "w",
+      "type": "center",
+      "qty": "e",
+      "purchase_unit_cost": "e",
+      "sale_unit_price": "e",
+      "purchase_total_cost": "e",
+      "prev_avg_cost": "e",
+      "onhand_qty": "e",
+      "avg_cost_after": "e",
+      "cogs": "e",
+      "onhand_cost": "e",
+      "sales_rev": "e",
+      "gross_profit": "e",
+      "note": "w",
+    }
+    for entry in all_custom_entries:
+      key = str(entry.get("key") or "").strip()
+      if key:
+        headings[key] = key
+        widths[key] = 150
+        col_anchor[key] = "center" if self._normalize_custom_type(entry.get("type")) == CUSTOM_TYPE_BOOLEAN else "w"
+
+    self.tx_tree["columns"] = columns
+    heading_gutter = "  "
+    for ci, c in enumerate(columns):
+      base_text = headings.get(c, c)
+      head_text = (f"{base_text}{heading_gutter}" if ci < (len(columns) - 1) else base_text)
+      anchor = col_anchor.get(c, "w")
+      self.tx_tree.heading(c, text=head_text, anchor=("center" if anchor == "center" else ("e" if anchor == "e" else "w")))
+      self.tx_tree.column(c, width=widths.get(c, 120), minwidth=32, anchor=anchor, stretch=False)
+
     self.tx_tree.delete(*self.tx_tree.get_children())
 
     # Most recent first (date DESC). Tie-breaker: higher ID first.
@@ -3516,12 +4599,21 @@ class InventoryApp(ctk.CTk):
 
       sku = str(r.get("sku") or "").strip()
       alias = self._get_alias_for_sku(sku)
-
-      values = (
+      tx_custom_values = dict(r.get("custom_fields") or {})
+      alias_item = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == sku), None)
+      alias_custom_values = dict((alias_item or {}).get("custom_fields") or {})
+      values_list: List[Any] = [
         r["id"],
         f"{pad_l}{r['date']}",
         f"{pad_l}{sku}",
         f"{pad_l}{alias}" if alias else "",
+      ]
+      for entry in self._get_all_custom_schema_in_display_order():
+        key = str(entry.get("key") or "").strip()
+        target = self._normalize_custom_target(entry.get("target"))
+        source_values = tx_custom_values if target == CUSTOM_TARGET_TRANSACTION else alias_custom_values
+        values_list.append(self._format_custom_field_value(entry, source_values.get(key, None)))
+      values_list.extend([
         r["type"],
         r["qty"],
         money(r["purchase_unit_cost"]) if r["type"] == TX_PURCHASE else "",
@@ -3535,7 +4627,8 @@ class InventoryApp(ctk.CTk):
         money(r["sales_rev"]),
         money(r["gross_profit"]),
         f"{pad_l}{(r['note'] or '')}" if (r["note"] or "") else "",
-      )
+      ])
+      values = tuple(values_list)
 
       # Zebra striping + "error" tint when inventory goes negative after this row
       is_even = (i % 2) == 0
@@ -3588,7 +4681,9 @@ class InventoryApp(ctk.CTk):
         "cogs": "e",
       }
     else:
-      columns = ["sku", "alias", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+      alias_custom_entries = self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS)
+      custom_cols = [str(x.get("key") or "").strip() for x in alias_custom_entries if str(x.get("key") or "").strip()]
+      columns = ["sku", "alias"] + custom_cols + ["onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
       headings = {
         "sku": "SKU",
         "alias": "Alias",
@@ -3599,6 +4694,8 @@ class InventoryApp(ctk.CTk):
         "last_sale_price": "Last Sale Price",
         "status": "Status",
       }
+      for c in custom_cols:
+        headings[c] = c
       widths = {
         "sku": 220,
         "alias": 260,
@@ -3609,6 +4706,8 @@ class InventoryApp(ctk.CTk):
         "last_sale_price": 150,
         "status": 220,
       }
+      for c in custom_cols:
+        widths[c] = 150
       col_anchor = {
         "sku": "w",
         "alias": "w",
@@ -3619,6 +4718,9 @@ class InventoryApp(ctk.CTk):
         "last_sale_price": "e",
         "status": "center",
       }
+      for c in custom_cols:
+        schema = self._custom_field_schema_map.get(c, {})
+        col_anchor[c] = "center" if self._normalize_custom_type(schema.get("type")) == CUSTOM_TYPE_BOOLEAN else "w"
 
     # Apply column set
     self.ov_tree["columns"] = columns
@@ -3744,16 +4846,24 @@ class InventoryApp(ctk.CTk):
 
       alias = self._get_alias_for_sku(str(s.get("sku") or "").strip())
 
-      values = (
+      values_list: List[Any] = [
         f"{pad_l}{s['sku']}",
         f"{pad_l}{alias}" if alias else "",
+      ]
+      alias_item = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == str(s.get("sku") or "").strip()), None)
+      alias_custom_values = dict((alias_item or {}).get("custom_fields") or {})
+      for entry in self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS):
+        key = str(entry.get("key") or "").strip()
+        values_list.append(self._format_custom_field_value(entry, alias_custom_values.get(key, None)))
+      values_list.extend([
         s["onhand_qty"],
         money(s["avg_cost"]),
         money(s["onhand_cost"]),
         f"{pad_l}{s['last_tx_date']}" if s["last_tx_date"] else "",
         money(s["last_sale_price"]) if s["last_sale_price"] else "",
         s["status"],
-      )
+      ])
+      values = tuple(values_list)
 
       is_even = (i % 2) == 0
       zebra_tag = "even" if is_even else "odd"
@@ -3815,10 +4925,12 @@ class InventoryApp(ctk.CTk):
       data_rows = self._compute_monthly_report_rows(rows)
       headers = ["month", "month_date", "purchase_cost", "sales_amount", "cogs"]
     else:
+      alias_custom_entries = self._get_custom_schema_for_target(CUSTOM_TARGET_ALIAS)
+      custom_headers = [str(x.get("key") or "").strip() for x in alias_custom_entries if str(x.get("key") or "").strip()]
       data_rows = []
       for sku in sorted(overview.keys()):
         s = overview[sku]
-        data_rows.append({
+        row = {
           "sku": s["sku"],
           "alias": self._get_alias_for_sku(str(s.get("sku") or "").strip()),
           "onhand_qty": s["onhand_qty"],
@@ -3827,8 +4939,14 @@ class InventoryApp(ctk.CTk):
           "last_tx_date": s["last_tx_date"],
           "last_sale_price": float(s["last_sale_price"]),
           "status": s["status"],
-        })
-      headers = ["sku", "alias", "onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
+        }
+        alias_item = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == str(s.get("sku") or "").strip()), None)
+        alias_custom_values = dict((alias_item or {}).get("custom_fields") or {})
+        for entry in alias_custom_entries:
+          key = str(entry.get("key") or "").strip()
+          row[key] = self._format_custom_field_value(entry, alias_custom_values.get(key, None))
+        data_rows.append(row)
+      headers = ["sku", "alias"] + custom_headers + ["onhand_qty", "avg_cost", "onhand_cost", "last_tx_date", "last_sale_price", "status"]
 
     try:
       with open(path, "w", encoding="utf-8", newline="") as f:
@@ -3885,6 +5003,7 @@ class InventoryApp(ctk.CTk):
     """Sync all 'Update Selected' button states across views (best-effort)."""
     self._sync_tx_update_selected_state()
     self._sync_alias_update_selected_state()
+    self._sync_custom_schema_update_selected_state()
 
   def _get_selected_tx_id(self) -> Optional[int]:
 
@@ -3941,7 +5060,9 @@ class InventoryApp(ctk.CTk):
     rows, _ = self.engine.compute(self.transactions)
 
     headers = [
-      "id","date","sku","alias","type","qty",
+      "id","date","sku","alias",
+      *[str(x.get("key") or "").strip() for x in self._get_all_custom_schema_in_display_order() if str(x.get("key") or "").strip()],
+      "type","qty",
       "purchase_unit_cost","sale_unit_price",
       "purchase_total_cost","prev_avg_cost",
       "onhand_qty","avg_cost_after",
@@ -3957,6 +5078,14 @@ class InventoryApp(ctk.CTk):
           sku = str(r.get("sku") or "").strip()
           r2 = dict(r)
           r2["alias"] = self._get_alias_for_sku(sku)
+          tx_custom_values = dict(r.get("custom_fields") or {})
+          alias_item = next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == sku), None)
+          alias_custom_values = dict((alias_item or {}).get("custom_fields") or {})
+          for entry in self._get_all_custom_schema_in_display_order():
+            key = str(entry.get("key") or "").strip()
+            target = self._normalize_custom_target(entry.get("target"))
+            source_values = tx_custom_values if target == CUSTOM_TARGET_TRANSACTION else alias_custom_values
+            r2[key] = self._format_custom_field_value(entry, source_values.get(key, None))
 
           line = []
           for h in headers:
