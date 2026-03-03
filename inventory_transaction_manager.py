@@ -1090,11 +1090,8 @@ class InventoryApp(ctk.CTk):
       (getattr(self, "entry_custom_schema_key", None), "Field Name: the custom column name used on the selected target."),
       (getattr(self, "opt_custom_schema_target", None), "Target: choose whether this field belongs to transactions or aliases."),
       (getattr(self, "opt_custom_schema_type", None), "Field Type: choose string, number, boolean, or enum."),
-      (getattr(self, "entry_custom_schema_enum", None), "Enum Values: enter one value, then use Add Value to build the allowed list."),
-      (getattr(self, "btn_custom_enum_add", None), "Add Value: append the typed enum value to the allowed-values list."),
-      (getattr(self, "btn_custom_enum_remove", None), "Remove: delete the selected enum values from the allowed-values list."),
-      (getattr(self, "btn_custom_enum_clear", None), "Clear: remove all enum values from the allowed-values list."),
-      (getattr(self, "custom_schema_enum_tree", None), "Allowed Values: the enum choices that will appear in generated inputs."),
+      (getattr(self, "btn_custom_enum_edit", None), "Edit Enum Values: open a popup to add, remove, confirm, or reject allowed enum values."),
+      (getattr(self, "lbl_custom_enum_summary", None), "Enum Summary: preview of the currently configured allowed enum values."),
       (getattr(self, "entry_custom_schema_description", None), "Description: optional tooltip text shown on the generated custom field label and input."),
       (getattr(self, "btn_custom_schema_add", None), "Add Field: create a new custom field definition."),
       (getattr(self, "btn_custom_schema_update", None), "Update Selected: edit the selected custom field definition."),
@@ -3093,41 +3090,17 @@ class InventoryApp(ctk.CTk):
 
     self.lbl_custom_schema_enum = ctk.CTkLabel(schema_frame, text="Enum Values")
     self.lbl_custom_schema_enum.grid(row=0, column=6, padx=(14, 6), pady=10, sticky="w")
-    self.var_custom_schema_enum_input = tk.StringVar(value="")
-    self.entry_custom_schema_enum = ctk.CTkEntry(schema_frame, textvariable=self.var_custom_schema_enum_input, width=220)
-    self.entry_custom_schema_enum.grid(row=0, column=7, padx=6, pady=10, sticky="ew")
-    apply_entry_shortcuts(self.entry_custom_schema_enum)
-
-    self.enum_btns = ctk.CTkFrame(schema_frame, fg_color="transparent")
-    self.enum_btns.grid(row=0, column=8, padx=(6, 10), pady=10, sticky="w")
-    self.btn_custom_enum_add = ctk.CTkButton(self.enum_btns, text="Add Value", width=100, command=self._on_custom_schema_enum_add)
-    self.btn_custom_enum_add.grid(row=0, column=0, padx=4)
-    self.btn_custom_enum_remove = ctk.CTkButton(self.enum_btns, text="Remove", width=90, command=self._on_custom_schema_enum_remove_selected)
-    self.btn_custom_enum_remove.grid(row=0, column=1, padx=4)
-    self.btn_custom_enum_clear = ctk.CTkButton(self.enum_btns, text="Clear", width=80, command=self._on_custom_schema_enum_clear)
-    self.btn_custom_enum_clear.grid(row=0, column=2, padx=4)
-
-    self.enum_table_frame = ctk.CTkFrame(schema_frame)
-    self.enum_table_frame.grid(row=1, column=6, columnspan=3, rowspan=2, padx=(14, 10), pady=(0, 10), sticky="nsew")
-    self.enum_table_frame.grid_rowconfigure(0, weight=1)
-    self.enum_table_frame.grid_columnconfigure(0, weight=1)
-    self.custom_schema_enum_tree = ttk.Treeview(
-      self.enum_table_frame,
-      columns=["value"],
-      show="headings",
-      height=4,
-      selectmode="extended",
-      style="Treeview",
-    )
-    self.custom_schema_enum_tree.grid(row=0, column=0, sticky="nsew")
-    self.custom_schema_enum_tree.heading("value", text="Allowed Values", anchor="w")
-    self.custom_schema_enum_tree.column("value", width=260, minwidth=140, anchor="w", stretch=True)
-    self.custom_schema_enum_tree.tag_configure("odd",  background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"]))
-    self.custom_schema_enum_tree.tag_configure("even", background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]))
-    enum_vsb = ttk.Scrollbar(self.enum_table_frame, orient="vertical", command=self.custom_schema_enum_tree.yview, style="Dark.Vertical.TScrollbar")
-    self.custom_schema_enum_tree.configure(yscrollcommand=enum_vsb.set)
-    enum_vsb.grid(row=0, column=1, sticky="ns")
+    self.enum_summary_frame = ctk.CTkFrame(schema_frame, fg_color="transparent")
+    self.enum_summary_frame.grid(row=0, column=7, columnspan=2, padx=6, pady=10, sticky="ew")
+    self.enum_summary_frame.grid_columnconfigure(1, weight=1)
+    self.btn_custom_enum_edit = ctk.CTkButton(self.enum_summary_frame, text="Edit Enum Values...", width=150, command=self._open_custom_schema_enum_popup)
+    self.btn_custom_enum_edit.grid(row=0, column=0, padx=(0, 8), sticky="w")
+    self.lbl_custom_enum_summary = ctk.CTkLabel(self.enum_summary_frame, text="No enum values")
+    self.lbl_custom_enum_summary.grid(row=0, column=1, sticky="w")
     self._custom_schema_enum_values: List[str] = []
+    self._custom_schema_enum_popup = None
+    self._custom_schema_enum_popup_values: List[str] = []
+    self._refresh_custom_schema_enum_summary()
 
     ctk.CTkLabel(schema_frame, text="Description (Tooltip)").grid(row=1, column=0, padx=(10, 6), pady=(0, 10), sticky="w")
     self.var_custom_schema_description = tk.StringVar(value="")
@@ -3160,19 +3133,16 @@ class InventoryApp(ctk.CTk):
       show = (self.var_custom_schema_type.get() or "").strip().lower() == CUSTOM_TYPE_ENUM
       if show:
         self.lbl_custom_schema_enum.grid()
-        self.entry_custom_schema_enum.grid()
-        self.enum_btns.grid()
-        self.enum_table_frame.grid()
+        self.enum_summary_frame.grid()
       else:
         self.lbl_custom_schema_enum.grid_remove()
-        self.entry_custom_schema_enum.grid_remove()
-        self.enum_btns.grid_remove()
-        self.enum_table_frame.grid_remove()
+        self.enum_summary_frame.grid_remove()
 
+    self._sync_custom_schema_enum_state = _sync_custom_schema_enum_state
     self.opt_custom_schema_type.configure(command=lambda _v: _sync_custom_schema_enum_state())
     _sync_custom_schema_enum_state()
 
-    for w in [self.entry_custom_schema_key, self.entry_custom_schema_enum, self.entry_custom_schema_description, self.btn_custom_schema_add, self.btn_custom_enum_add]:
+    for w in [self.entry_custom_schema_key, self.entry_custom_schema_description, self.btn_custom_schema_add]:
       bind_enter_shortcut(w, self._on_custom_schema_add)
 
     schema_table_frame = ctk.CTkFrame(self.tab_custom)
@@ -3512,7 +3482,7 @@ class InventoryApp(ctk.CTk):
     # Custom Fields tab controls
     for w in [
       getattr(self, "entry_custom_schema_key", None),
-      getattr(self, "entry_custom_schema_enum", None),
+      getattr(self, "entry_custom_schema_description", None),
     ]:
       if w is None:
         continue
@@ -3535,6 +3505,7 @@ class InventoryApp(ctk.CTk):
       getattr(self, "btn_custom_schema_delete", None),
       getattr(self, "btn_custom_schema_up", None),
       getattr(self, "btn_custom_schema_down", None),
+      getattr(self, "btn_custom_enum_edit", None),
     ]:
       if b is None:
         continue
@@ -4012,58 +3983,346 @@ class InventoryApp(ctk.CTk):
   def _parse_custom_schema_enum_input(self, raw: str) -> List[str]:
     return self._normalize_enum_values([x.strip() for x in str(raw or "").split(",")])
 
-  def _refresh_custom_schema_enum_tree(self) -> None:
-    if not hasattr(self, "custom_schema_enum_tree"):
+  def _refresh_custom_schema_enum_summary(self) -> None:
+    if not hasattr(self, "lbl_custom_enum_summary"):
+      return
+    vals = list(getattr(self, "_custom_schema_enum_values", []) or [])
+    if not vals:
+      text = "No enum values"
+    elif len(vals) <= 3:
+      text = ", ".join(vals)
+    else:
+      text = ", ".join(vals[:3]) + f", ... (+{len(vals) - 3})"
+    try:
+      self.lbl_custom_enum_summary.configure(text=text)
+    except Exception:
+      pass
+
+  def _refresh_custom_schema_enum_popup_tree(self) -> None:
+    tree = getattr(self, "_custom_schema_enum_popup_tree", None)
+    if tree is None:
       return
     try:
-      self.custom_schema_enum_tree.delete(*self.custom_schema_enum_tree.get_children())
+      tree.delete(*tree.get_children())
     except Exception:
       return
-    for i, value in enumerate(self._custom_schema_enum_values or []):
+    for i, value in enumerate(getattr(self, "_custom_schema_enum_popup_values", []) or []):
       tag = "even" if (i % 2) == 0 else "odd"
-      self.custom_schema_enum_tree.insert("", "end", iid=f"enum_{i}", values=(value,), tags=(tag,))
+      tree.insert("", "end", iid=f"enum_{i}", values=(value,), tags=(tag,))
 
-  def _on_custom_schema_enum_add(self) -> None:
-    raw = str(getattr(self, "var_custom_schema_enum_input", tk.StringVar(value="")).get() or "").strip()
+  def _on_custom_schema_enum_popup_add(self) -> None:
+    raw = str(getattr(self, "_custom_schema_enum_popup_input_var", tk.StringVar(value="")).get() or "").strip()
     values = self._parse_custom_schema_enum_input(raw)
     if not values:
       return
-    cur = list(getattr(self, "_custom_schema_enum_values", []) or [])
+    cur = list(getattr(self, "_custom_schema_enum_popup_values", []) or [])
     seen = set(cur)
     for value in values:
       if value not in seen:
         seen.add(value)
         cur.append(value)
-    self._custom_schema_enum_values = cur
-    self._refresh_custom_schema_enum_tree()
+    self._custom_schema_enum_popup_values = cur
+    self._refresh_custom_schema_enum_popup_tree()
     try:
-      self.var_custom_schema_enum_input.set("")
-      self.entry_custom_schema_enum.focus_set()
+      self._custom_schema_enum_popup_input_var.set("")
+      self._custom_schema_enum_popup_entry.focus_set()
     except Exception:
       pass
 
-  def _on_custom_schema_enum_remove_selected(self) -> None:
-    if not hasattr(self, "custom_schema_enum_tree"):
+  def _on_custom_schema_enum_popup_remove_selected(self) -> None:
+    tree = getattr(self, "_custom_schema_enum_popup_tree", None)
+    if tree is None:
       return
-    selected = list(self.custom_schema_enum_tree.selection() or [])
+    selected = list(tree.selection() or [])
     if not selected:
       return
-    keep: List[str] = []
     remove_idx = set()
     for iid in selected:
       try:
         remove_idx.add(int(str(iid).split("_")[-1]))
       except Exception:
         pass
-    for i, value in enumerate(list(getattr(self, "_custom_schema_enum_values", []) or [])):
-      if i not in remove_idx:
-        keep.append(value)
-    self._custom_schema_enum_values = keep
-    self._refresh_custom_schema_enum_tree()
+    keep = [value for i, value in enumerate(list(getattr(self, "_custom_schema_enum_popup_values", []) or [])) if i not in remove_idx]
+    self._custom_schema_enum_popup_values = keep
+    self._refresh_custom_schema_enum_popup_tree()
 
-  def _on_custom_schema_enum_clear(self) -> None:
-    self._custom_schema_enum_values = []
-    self._refresh_custom_schema_enum_tree()
+  def _on_custom_schema_enum_popup_clear(self) -> None:
+    self._custom_schema_enum_popup_values = []
+    self._refresh_custom_schema_enum_popup_tree()
+
+  def _on_custom_schema_enum_popup_move(self, direction: int) -> None:
+    tree = getattr(self, "_custom_schema_enum_popup_tree", None)
+    if tree is None:
+      return
+    selected = list(tree.selection() or [])
+    if not selected:
+      return
+    try:
+      selected_idx = sorted(
+        {
+          int(str(iid).split("_")[-1])
+          for iid in selected
+          if str(iid).startswith("enum_")
+        }
+      )
+    except Exception:
+      return
+    values = list(getattr(self, "_custom_schema_enum_popup_values", []) or [])
+    if not values or not selected_idx:
+      return
+
+    if direction < 0:
+      if selected_idx[0] <= 0:
+        return
+      for idx in selected_idx:
+        values[idx - 1], values[idx] = values[idx], values[idx - 1]
+      selected_idx = [idx - 1 for idx in selected_idx]
+    elif direction > 0:
+      if selected_idx[-1] >= len(values) - 1:
+        return
+      for idx in reversed(selected_idx):
+        values[idx + 1], values[idx] = values[idx], values[idx + 1]
+      selected_idx = [idx + 1 for idx in selected_idx]
+    else:
+      return
+
+    self._custom_schema_enum_popup_values = values
+    self._refresh_custom_schema_enum_popup_tree()
+    try:
+      new_ids = [f"enum_{idx}" for idx in selected_idx]
+      tree.selection_set(new_ids)
+      tree.focus(new_ids[0])
+      tree.see(new_ids[0])
+    except Exception:
+      pass
+
+  def _close_custom_schema_enum_popup(self, *, confirm: bool) -> None:
+    if confirm:
+      self._custom_schema_enum_values = list(getattr(self, "_custom_schema_enum_popup_values", []) or [])
+      self._refresh_custom_schema_enum_summary()
+    popup = getattr(self, "_custom_schema_enum_popup", None)
+    if popup is not None:
+      try:
+        popup.destroy()
+      except Exception:
+        pass
+    self._custom_schema_enum_popup = None
+    self._custom_schema_enum_popup_tree = None
+    self._custom_schema_enum_popup_entry = None
+    self._custom_schema_enum_popup_input_var = None
+    self._custom_schema_enum_popup_values = []
+
+  def _open_custom_schema_enum_popup(self) -> None:
+    if getattr(self, "_custom_schema_enum_popup", None) is not None:
+      try:
+        self._custom_schema_enum_popup.lift()
+        self._custom_schema_enum_popup.focus_force()
+      except Exception:
+        pass
+      return
+
+    popup = ctk.CTkToplevel(self)
+    popup.title(f"{APP_TITLE} - Edit Enum Values")
+    popup.transient(self)
+    popup.resizable(False, False)
+    try:
+      set_window_icon(popup, APP_ICON_ICO_PATH, APP_ICON_PNG_PATH)
+    except Exception:
+      pass
+    try:
+      parent_icon = getattr(self, "_iconphoto_ref", None)
+      if parent_icon is not None:
+        popup.iconphoto(True, parent_icon)
+        popup._iconphoto_ref = parent_icon  # type: ignore[attr-defined]
+    except Exception:
+      pass
+    try:
+      popup.grab_set()
+    except Exception:
+      pass
+    popup.grid_columnconfigure(0, weight=1)
+    popup.grid_rowconfigure(1, weight=1)
+
+    top = ctk.CTkFrame(popup)
+    top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+    top.grid_columnconfigure(1, weight=1)
+
+    lbl_enum_value = ctk.CTkLabel(top, text="Enum Value")
+    lbl_enum_value.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="w")
+    self._custom_schema_enum_popup_input_var = tk.StringVar(value="")
+    self._custom_schema_enum_popup_entry = ctk.CTkEntry(top, textvariable=self._custom_schema_enum_popup_input_var, width=260)
+    self._custom_schema_enum_popup_entry.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
+    apply_entry_shortcuts(self._custom_schema_enum_popup_entry)
+    btn_add = ctk.CTkButton(top, text="Add Value (Enter)", width=140, command=self._on_custom_schema_enum_popup_add)
+    btn_add.grid(row=0, column=2, padx=(6, 10), pady=10)
+    bind_enter_shortcut(popup, self._on_custom_schema_enum_popup_add)
+    bind_enter_shortcut(self._custom_schema_enum_popup_entry, self._on_custom_schema_enum_popup_add)
+    bind_enter_shortcut(btn_add, self._on_custom_schema_enum_popup_add)
+
+    table_frame = ctk.CTkFrame(popup)
+    table_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+    table_frame.grid_rowconfigure(0, weight=1)
+    table_frame.grid_columnconfigure(0, weight=1)
+    self._custom_schema_enum_popup_tree = ttk.Treeview(
+      table_frame,
+      columns=["value"],
+      show="headings",
+      height=8,
+      selectmode="extended",
+      style="Treeview",
+    )
+    self._custom_schema_enum_popup_tree.grid(row=0, column=0, sticky="nsew")
+    self._custom_schema_enum_popup_tree.heading("value", text="Allowed Values", anchor="w")
+    self._custom_schema_enum_popup_tree.column("value", width=320, minwidth=180, anchor="w", stretch=True)
+    self._custom_schema_enum_popup_tree.tag_configure("odd",  background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"]))
+    self._custom_schema_enum_popup_tree.tag_configure("even", background=_ctk_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]))
+    vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self._custom_schema_enum_popup_tree.yview, style="Dark.Vertical.TScrollbar")
+    self._custom_schema_enum_popup_tree.configure(yscrollcommand=vsb.set)
+    vsb.grid(row=0, column=1, sticky="ns")
+
+    mid_btns = ctk.CTkFrame(popup, fg_color="transparent")
+    mid_btns.grid(row=2, column=0, sticky="e", padx=12, pady=(0, 8))
+    btn_up = ctk.CTkButton(mid_btns, text="Move Up", width=90, command=lambda: self._on_custom_schema_enum_popup_move(-1))
+    btn_up.grid(row=0, column=0, padx=4)
+    btn_down = ctk.CTkButton(mid_btns, text="Move Down", width=100, command=lambda: self._on_custom_schema_enum_popup_move(1))
+    btn_down.grid(row=0, column=1, padx=4)
+    btn_remove = ctk.CTkButton(mid_btns, text="Remove", width=90, command=self._on_custom_schema_enum_popup_remove_selected)
+    btn_remove.grid(row=0, column=2, padx=4)
+    btn_clear = ctk.CTkButton(mid_btns, text="Clear", width=80, command=self._on_custom_schema_enum_popup_clear)
+    btn_clear.grid(row=0, column=3, padx=4)
+
+    bottom = ctk.CTkFrame(popup, fg_color="transparent")
+    bottom.grid(row=3, column=0, sticky="e", padx=12, pady=(0, 12))
+    btn_ok = ctk.CTkButton(bottom, text="Confirm", width=100, command=lambda: self._close_custom_schema_enum_popup(confirm=True))
+    btn_ok.grid(row=0, column=0, padx=4)
+    btn_reject = ctk.CTkButton(bottom, text="Reject", width=90, command=lambda: self._close_custom_schema_enum_popup(confirm=False))
+    btn_reject.grid(row=0, column=1, padx=4)
+
+    tooltip(top, text="Enum Value Entry: type a value and press Enter or Add Value to append it to the allowed values list.")
+    tooltip(lbl_enum_value, self._custom_schema_enum_popup_entry, text="Enum Value: type one allowed value here, then press Enter to add it to the list.")
+    tooltip(btn_add, text="Add Value: append the typed enum value to the allowed values list.")
+    tooltip(self._custom_schema_enum_popup_tree, text="Allowed Values: current ordered list of choices for this enum field.")
+    tooltip(btn_up, text="Move Up: move the selected enum value(s) up in the allowed values order.")
+    tooltip(btn_down, text="Move Down: move the selected enum value(s) down in the allowed values order.")
+    tooltip(btn_remove, text="Remove: delete the selected enum value(s) from the allowed values list.")
+    tooltip(btn_clear, text="Clear: remove every allowed enum value from the list.")
+    tooltip(btn_ok, text="Confirm: save the popup enum values back to the custom field and close this window.")
+    tooltip(btn_reject, text="Reject: discard popup changes and close this window.")
+
+    _popup_tip_state = {"win": None, "lbl": None, "font": None, "last": None}
+
+    def _popup_tip_hide() -> None:
+      win = _popup_tip_state.get("win")
+      if win is not None:
+        try:
+          win.destroy()
+        except Exception:
+          pass
+      _popup_tip_state["win"] = None
+      _popup_tip_state["lbl"] = None
+      _popup_tip_state["last"] = None
+
+    def _popup_tip_show(*, text: str, x_root: int, y_root: int) -> None:
+      if _popup_tip_state["win"] is None:
+        win = tk.Toplevel(popup)
+        win.withdraw()
+        win.overrideredirect(True)
+        try:
+          win.attributes("-topmost", True)
+        except Exception:
+          pass
+
+        bg = _ctk_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"])
+        fg = _ctk_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+
+        from tkinter import font as tkfont
+        if _popup_tip_state["font"] is None:
+          f = tkfont.nametofont("TkDefaultFont").copy()
+          try:
+            f.configure(size=int(f.cget("size")) + 4)
+          except Exception:
+            f.configure(size=14)
+          _popup_tip_state["font"] = f
+
+        lbl = tk.Label(
+          win,
+          text="",
+          justify="left",
+          anchor="w",
+          padx=8,
+          pady=4,
+          bg=bg,
+          fg=fg,
+          font=_popup_tip_state["font"],
+          bd=1,
+          relief="solid",
+        )
+        lbl.pack()
+        _popup_tip_state["win"] = win
+        _popup_tip_state["lbl"] = lbl
+
+      win = _popup_tip_state["win"]
+      lbl = _popup_tip_state["lbl"]
+      if win is None or lbl is None:
+        return
+
+      lbl.configure(text=text)
+      try:
+        win.geometry(f"+{x_root + 14}+{y_root + 16}")
+        win.deiconify()
+      except Exception:
+        pass
+
+    def _on_popup_tree_hover(event) -> None:
+      tree = getattr(self, "_custom_schema_enum_popup_tree", None)
+      if tree is None:
+        _popup_tip_hide()
+        return
+
+      region = tree.identify_region(event.x, event.y)
+      if region == "heading":
+        text = "Allowed Values: current ordered list of choices for this enum field."
+        key = ("__heading__", text)
+        if _popup_tip_state["last"] != key:
+          _popup_tip_state["last"] = key
+        _popup_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+        return
+
+      if region != "cell":
+        _popup_tip_hide()
+        return
+
+      iid = tree.identify_row(event.y)
+      if not iid:
+        _popup_tip_hide()
+        return
+      try:
+        text = str(tree.set(iid, "value") or "")
+      except Exception:
+        _popup_tip_hide()
+        return
+      if not text:
+        _popup_tip_hide()
+        return
+      key = (iid, text)
+      if _popup_tip_state["last"] != key:
+        _popup_tip_state["last"] = key
+      _popup_tip_show(text=text, x_root=event.x_root, y_root=event.y_root)
+
+    self._custom_schema_enum_popup_tree.bind("<Motion>", _on_popup_tree_hover, add="+")
+    self._custom_schema_enum_popup_tree.bind("<Leave>", lambda _e: _popup_tip_hide(), add="+")
+    self._custom_schema_enum_popup_tree.bind("<ButtonPress-1>", lambda _e: _popup_tip_hide(), add="+")
+    self._custom_schema_enum_popup_tree.bind("<MouseWheel>", lambda _e: _popup_tip_hide(), add="+")
+    self._custom_schema_enum_popup_tree.bind("<Destroy>", lambda _e: _popup_tip_hide(), add="+")
+
+    self._custom_schema_enum_popup = popup
+    self._custom_schema_enum_popup_values = list(getattr(self, "_custom_schema_enum_values", []) or [])
+    self._refresh_custom_schema_enum_popup_tree()
+    popup.protocol("WM_DELETE_WINDOW", lambda: self._close_custom_schema_enum_popup(confirm=False))
+    try:
+      self._custom_schema_enum_popup_entry.focus_set()
+    except Exception:
+      pass
 
   def _read_custom_schema_form(self) -> Dict[str, Any]:
     key = str(self.var_custom_schema_key.get() or "").strip()
@@ -4097,9 +4356,10 @@ class InventoryApp(ctk.CTk):
     self.var_custom_schema_type.set(self._normalize_custom_type(entry.get("type")))
     self.var_custom_schema_description.set(str(entry.get("description") or ""))
     self._custom_schema_enum_values = [str(x) for x in (entry.get("enum") or []) if str(x).strip()]
-    self._refresh_custom_schema_enum_tree()
+    self._refresh_custom_schema_enum_summary()
     try:
-      self.var_custom_schema_enum_input.set("")
+      if getattr(self, "_custom_schema_enum_popup_input_var", None) is not None:
+        self._custom_schema_enum_popup_input_var.set("")
     except Exception:
       pass
     if hasattr(self, "opt_custom_schema_target"):
@@ -4112,6 +4372,10 @@ class InventoryApp(ctk.CTk):
         self.opt_custom_schema_type.set(self.var_custom_schema_type.get())
       except Exception:
         pass
+    try:
+      getattr(self, "_sync_custom_schema_enum_state", lambda: None)()
+    except Exception:
+      pass
 
   def _sync_custom_schema_update_selected_state(self) -> None:
     has_project = bool(self.project_data_path)
@@ -4492,12 +4756,15 @@ class InventoryApp(ctk.CTk):
         self._remove_custom_schema_keys_from_values([str(entry.get("key") or "").strip()], target=entry.get("target"))
     self._save_and_refresh(schema_changed=True)
     self.var_custom_schema_key.set("")
-    self.var_custom_schema_enum_input.set("")
     self._custom_schema_enum_values = []
-    self._refresh_custom_schema_enum_tree()
+    self._refresh_custom_schema_enum_summary()
     self.var_custom_schema_description.set("")
     self.var_custom_schema_target.set(CUSTOM_TARGET_ALIAS)
     self.var_custom_schema_type.set(CUSTOM_TYPE_STRING)
+    try:
+      getattr(self, "_sync_custom_schema_enum_state", lambda: None)()
+    except Exception:
+      pass
 
   def _on_delete_selected(self) -> None:
     if not self.project_data_path:
