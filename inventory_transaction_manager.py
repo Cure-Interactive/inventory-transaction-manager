@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import re
@@ -368,6 +369,7 @@ SCRIPT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 APP_ICON_ICO_PATH = os.path.join(SCRIPT_ROOT_DIR, "icon.ico")
 APP_ICON_PNG_PATH = os.path.join(SCRIPT_ROOT_DIR, "icon.png")
+APP_SPLASH_ICON_PNG_PATH = os.path.join(SCRIPT_ROOT_DIR, "icon_512x512.png")
 
 APP_CONFIG_FILENAME = "config.json"
 APP_CONFIG_PATH = os.path.join(SCRIPT_ROOT_DIR, APP_CONFIG_FILENAME)
@@ -631,6 +633,30 @@ def parse_date(raw: str) -> str:
 def money(x: float) -> str:
   return f"${x:,.2f}"
 
+def _load_splash_icon_tk_image(png_path: str, *, max_size_px: int = 180) -> Optional[tk.PhotoImage]:
+  """
+  Best-effort load + downscale a splash icon image without Pillow.
+  """
+  abs_png = os.path.abspath(png_path) if png_path else ""
+  if not abs_png or not os.path.isfile(abs_png):
+    return None
+
+  try:
+    img = tk.PhotoImage(file=abs_png)
+  except Exception:
+    return None
+
+  try:
+    w = max(int(img.width()), 1)
+    h = max(int(img.height()), 1)
+    factor = max(1, int(math.ceil(max(w, h) / float(max_size_px))))
+    if factor > 1:
+      img = img.subsample(factor, factor)
+  except Exception:
+    pass
+
+  return img
+
 
 # =============================================================================
 # [🖥️ UI App]
@@ -645,11 +671,14 @@ class InventoryApp(ctk.CTk):
     set_window_icon(self, APP_ICON_ICO_PATH, APP_ICON_PNG_PATH)
 
     self.LOG_TAG = "[🧮 Inventory]"
+    Log.info(self.LOG_TAG, "Initializing UI app.")
     self.title(APP_TITLE)
 
     self.geometry("1480x820")
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("dark-blue")
+    self._startup_splash_build()
+    self._startup_splash_set("Applying UI theme...")
 
     # Apply ttk theming (Treeview + Scrollbar) to match CTk dark mode
     apply_dark_ttk_treeview_style(self)
@@ -678,6 +707,11 @@ class InventoryApp(ctk.CTk):
     self.recent_project_dirs = _filter_existing_dirs(self.recent_project_dirs)
     self.recent_project_dirs = self.recent_project_dirs[: self.recent_project_dirs_max]
     self._persist_app_config()
+    Log.info(self.LOG_TAG, "Loaded app config.", {
+      "config_path": APP_CONFIG_PATH,
+      "recent_projects": len(self.recent_project_dirs),
+      "recent_projects_max": self.recent_project_dirs_max,
+    })
 
     # Data
     self.transactions: List[Transaction] = []
@@ -696,24 +730,229 @@ class InventoryApp(ctk.CTk):
     # Guard flags for SKU/Alias UI syncing
     self._alias_sync_guard = False
 
+    self._startup_splash_set("Building layout...")
     self._build_ui()
 
     # Auto-load first recent project if available
+    self._startup_splash_set("Loading project data...")
     if self.recent_project_dirs:
       self.project_dir_var.set(self.recent_project_dirs[0])
+      Log.info(self.LOG_TAG, "Auto-loading most recent project.", {"project_dir": self.recent_project_dirs[0]})
       self._load_project_dir(self.recent_project_dirs[0])
     else:
+      Log.info(self.LOG_TAG, "No recent projects found; starting with empty state.")
       self._refresh_all()
       self._refresh_aliases_ui()
       self._set_tx_controls_enabled(False)
 
+    self._startup_splash_set("Ready.")
+    self._startup_splash_done()
     Log.ok(self.LOG_TAG, "Ready.", {"recent_projects": len(self.recent_project_dirs)})
+
+  def _startup_splash_build(self) -> None:
+    overlay_bg = "#1f1f1f"
+    self._startup_splash_active = True
+    self._startup_splash_raise_job = None
+    self._startup_splash_w = 620
+    self._startup_splash_h = 380
+
+    self._startup_splash_window = tk.Toplevel(self)
+    try:
+      self._startup_splash_window.withdraw()
+    except Exception:
+      pass
+    try:
+      self._startup_splash_window.overrideredirect(True)
+    except Exception:
+      pass
+    try:
+      self._startup_splash_window.attributes("-topmost", True)
+    except Exception:
+      pass
+    try:
+      self._startup_splash_window.configure(bg=overlay_bg)
+    except Exception:
+      pass
+    try:
+      self._startup_splash_window.resizable(False, False)
+    except Exception:
+      pass
+
+    self._startup_splash_recenter()
+
+    self._startup_splash_frame = ctk.CTkFrame(self._startup_splash_window, fg_color=overlay_bg, corner_radius=0)
+    self._startup_splash_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    self._startup_splash_center = ctk.CTkFrame(self._startup_splash_frame, fg_color="transparent", corner_radius=0)
+    self._startup_splash_center.place(relx=0.5, rely=0.5, anchor="center")
+
+    self._startup_splash_logo = None
+    self._startup_splash_logo_ref = (
+      _load_splash_icon_tk_image(APP_SPLASH_ICON_PNG_PATH, max_size_px=180)
+      or _load_splash_icon_tk_image(APP_ICON_PNG_PATH, max_size_px=180)
+    )
+
+    if self._startup_splash_logo_ref is not None:
+      self._startup_splash_logo = tk.Label(
+        self._startup_splash_center,
+        image=self._startup_splash_logo_ref,
+        bd=0,
+        highlightthickness=0,
+      )
+      try:
+        self._startup_splash_logo.configure(bg=overlay_bg)
+      except Exception:
+        pass
+      self._startup_splash_logo.pack(pady=(0, 10))
+
+    self._startup_splash_title = ctk.CTkLabel(
+      self._startup_splash_center,
+      text=APP_TITLE,
+      font=("Segoe UI", 20, "bold"),
+    )
+    self._startup_splash_title.pack(pady=(0, 6))
+
+    self._startup_splash_status = ctk.CTkLabel(
+      self._startup_splash_center,
+      text="Starting...",
+      font=("Segoe UI", 12),
+    )
+    self._startup_splash_status.pack(pady=(0, 14))
+
+    self._startup_splash_bar = ctk.CTkProgressBar(
+      self._startup_splash_center,
+      mode="indeterminate",
+    )
+    self._startup_splash_bar.pack(padx=30, fill="x")
+    self._startup_splash_bar.start()
+
+    try:
+      self._startup_splash_window.deiconify()
+      self._startup_splash_window.lift()
+      self.update_idletasks()
+      self.update()
+    except Exception:
+      pass
+
+    self._startup_splash_raise_start()
+
+  def _startup_splash_recenter(self) -> None:
+    try:
+      wnd = getattr(self, "_startup_splash_window", None)
+      if wnd is None:
+        return
+
+      w = int(getattr(self, "_startup_splash_w", 620) or 620)
+      h = int(getattr(self, "_startup_splash_h", 380) or 380)
+
+      self.update_idletasks()
+      x = int(self.winfo_rootx()) + max((int(self.winfo_width()) - w) // 2, 0)
+      y = int(self.winfo_rooty()) + max((int(self.winfo_height()) - h) // 2, 0)
+
+      if int(self.winfo_width()) <= 1 or int(self.winfo_height()) <= 1:
+        x = max((self.winfo_screenwidth() - w) // 2, 0)
+        y = max((self.winfo_screenheight() - h) // 2, 0)
+
+      wnd.geometry(f"{w}x{h}+{x}+{y}")
+    except Exception:
+      pass
+
+  def _startup_splash_raise_start(self) -> None:
+    try:
+      self._startup_splash_raise_stop()
+      self._startup_splash_raise_job = self.after(33, self._startup_splash_raise_tick)
+    except Exception:
+      self._startup_splash_raise_job = None
+
+  def _startup_splash_raise_stop(self) -> None:
+    try:
+      job = getattr(self, "_startup_splash_raise_job", None)
+      if job is not None:
+        self.after_cancel(job)
+    except Exception:
+      pass
+    self._startup_splash_raise_job = None
+
+  def _startup_splash_raise_tick(self) -> None:
+    try:
+      if not bool(getattr(self, "_startup_splash_active", False)):
+        self._startup_splash_raise_job = None
+        return
+      frame = getattr(self, "_startup_splash_frame", None)
+      wnd = getattr(self, "_startup_splash_window", None)
+      if frame is None or wnd is None:
+        self._startup_splash_raise_job = None
+        return
+      self._startup_splash_recenter()
+      wnd.lift()
+      try:
+        wnd.attributes("-topmost", True)
+      except Exception:
+        pass
+      self._startup_splash_raise_job = self.after(33, self._startup_splash_raise_tick)
+    except Exception:
+      self._startup_splash_raise_job = None
+
+  def _startup_splash_set(self, text: str) -> None:
+    try:
+      if getattr(self, "_startup_splash_status", None) is not None:
+        self._startup_splash_status.configure(text=str(text or "Loading..."))
+      wnd = getattr(self, "_startup_splash_window", None)
+      if wnd is not None:
+        self._startup_splash_recenter()
+        wnd.lift()
+        try:
+          wnd.attributes("-topmost", True)
+        except Exception:
+          pass
+      self.update_idletasks()
+      self.update()
+    except Exception:
+      pass
+
+  def _startup_splash_done(self) -> None:
+    self._startup_splash_active = False
+    self._startup_splash_raise_stop()
+
+    try:
+      if getattr(self, "_startup_splash_bar", None) is not None:
+        self._startup_splash_bar.stop()
+    except Exception:
+      pass
+
+    try:
+      frame = getattr(self, "_startup_splash_frame", None)
+      if frame is not None:
+        frame.place_forget()
+        frame.destroy()
+    except Exception:
+      pass
+
+    try:
+      wnd = getattr(self, "_startup_splash_window", None)
+      if wnd is not None:
+        wnd.destroy()
+    except Exception:
+      pass
+
+    self._startup_splash_window = None
+    self._startup_splash_frame = None
+    self._startup_splash_center = None
+    self._startup_splash_logo = None
+    self._startup_splash_logo_ref = None
+    self._startup_splash_title = None
+    self._startup_splash_status = None
+    self._startup_splash_bar = None
 
   # -----------------------------------------------------------------------------
   # App config persistence (recent projects)
   # -----------------------------------------------------------------------------
 
   def _persist_app_config(self) -> None:
+    Log.info(self.LOG_TAG, "Persisting app config.", {
+      "config_path": APP_CONFIG_PATH,
+      "recent_projects": len(self.recent_project_dirs),
+    })
     _write_json_atomic(APP_CONFIG_PATH, {
       "recent_project_dirs_max": int(self.recent_project_dirs_max),
       "recent_project_dirs": list(self.recent_project_dirs),
@@ -724,9 +963,11 @@ class InventoryApp(ctk.CTk):
 
   def _remember_project_dir(self, p: str) -> None:
     if not p:
+      Log.warn(self.LOG_TAG, "Skip remember project directory: empty input.")
       return
     p_norm = _norm_dir(p)
     if not os.path.isdir(p_norm):
+      Log.warn(self.LOG_TAG, "Skip remember project directory: path is not a directory.", {"project_dir": p_norm})
       return
 
     items = [p_norm] + [x for x in self.recent_project_dirs if x != p_norm]
@@ -737,8 +978,13 @@ class InventoryApp(ctk.CTk):
 
     self._persist_app_config()
     self._refresh_project_dropdown()
+    Log.info(self.LOG_TAG, "Updated recent project directories.", {
+      "selected": p_norm,
+      "recent_projects": len(self.recent_project_dirs),
+    })
 
   def _clear_project_history(self) -> None:
+    Log.warn(self.LOG_TAG, "Clearing recent project directory history.", {"before": len(self.recent_project_dirs)})
     self.recent_project_dirs = []
     self._persist_app_config()
     self._refresh_project_dropdown()
@@ -841,7 +1087,9 @@ class InventoryApp(ctk.CTk):
 
   def _load_project_data_from_file(self, path: str) -> Tuple[List[Transaction], List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not os.path.exists(path):
+      Log.info(self.LOG_TAG, "Project data file does not exist yet; using empty defaults.", {"path": path})
       return [], [], []
+    Log.info(self.LOG_TAG, "Loading project data file.", {"path": path})
     with open(path, "r", encoding="utf-8") as f:
       raw = json.load(f)
 
@@ -878,6 +1126,12 @@ class InventoryApp(ctk.CTk):
           aliases.append({"sku": sku, "name": name, "custom_fields": custom_fields})
 
     aliases.sort(key=lambda x: (str(x.get("name", "")).lower(), str(x.get("sku", "")).lower()))
+    Log.info(self.LOG_TAG, "Loaded project data file.", {
+      "path": path,
+      "tx_count": len(txs),
+      "alias_count": len(aliases),
+      "custom_field_count": len(schema),
+    })
     return txs, aliases, schema
 
   def _save_project_data_to_file(
@@ -887,6 +1141,12 @@ class InventoryApp(ctk.CTk):
     aliases: List[Dict[str, Any]],
     custom_schema: List[Dict[str, Any]],
   ) -> None:
+    Log.info(self.LOG_TAG, "Saving project data file.", {
+      "path": path,
+      "tx_count": len(txs or []),
+      "alias_count": len(aliases or []),
+      "custom_field_count": len(custom_schema or []),
+    })
     payload = {
       "transactions": [asdict(t) for t in txs],
       "aliases": list(aliases or []),
@@ -896,14 +1156,21 @@ class InventoryApp(ctk.CTk):
 
   def _load_project_dir(self, project_dir: str) -> None:
     p = os.path.abspath(project_dir)
+    Log.info(self.LOG_TAG, "Loading project directory.", {"project_dir": p})
     if not os.path.isdir(p):
+      Log.error(self.LOG_TAG, "Project directory is missing or invalid.", {"project_dir": p})
       messagebox.showerror("Project", "Project directory is missing or invalid.")
       return
 
     self.project_dir = p
     self.project_data_path = self._project_data_file_for_dir(p)
-
-    txs, aliases, custom_schema = self._load_project_data_from_file(self.project_data_path)
+    try:
+      txs, aliases, custom_schema = self._load_project_data_from_file(self.project_data_path)
+    except Exception as e:
+      Log.error(self.LOG_TAG, "Failed to load project data.", {"project_dir": p, "data_path": self.project_data_path, "error": str(e)})
+      messagebox.showerror("Project Load Failed", str(e))
+      self._set_tx_controls_enabled(False)
+      return
 
     self.transactions = txs
     self._normalize_sort()
@@ -933,8 +1200,16 @@ class InventoryApp(ctk.CTk):
 
   def _save_and_refresh(self, *, schema_changed: bool = False) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Cannot save: no project data path selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
+    Log.info(self.LOG_TAG, "Saving and refreshing UI state.", {
+      "project_data_path": self.project_data_path,
+      "schema_changed": bool(schema_changed),
+      "tx_count": len(self.transactions),
+      "alias_count": len(self.aliases_list),
+      "custom_field_count": len(self.custom_fields_schema),
+    })
     self._normalize_sort()
     self._save_project_data_to_file(
       self.project_data_path,
@@ -952,6 +1227,7 @@ class InventoryApp(ctk.CTk):
         next((a for a in (self.aliases_list or []) if str(a.get("sku") or "").strip() == str(self._get_selected_alias_sku() or "").strip()), None)
       )
     self._refresh_all()
+    Log.ok(self.LOG_TAG, "Save + refresh complete.", {"schema_changed": bool(schema_changed)})
 
   # -----------------------------------------------------------------------------
   # UI Construction
@@ -3354,25 +3630,33 @@ class InventoryApp(ctk.CTk):
 
   def _on_project_combo_selected(self) -> None:
     # Same behavior as your attached script: selecting loads immediately
+    Log.info(self.LOG_TAG, "Project selected from recent list.", {"project_dir": self.project_dir_var.get()})
     self._on_load_project()
 
   def _on_browse_project(self) -> None:
+    Log.info(self.LOG_TAG, "Opening project directory selector.")
     p = filedialog.askdirectory(title="Select Project Directory")
     if not p:
+      Log.warn(self.LOG_TAG, "Project directory selector canceled.")
       return
     self.project_dir_var.set(os.path.abspath(p))
+    Log.info(self.LOG_TAG, "Project directory selected from dialog.", {"project_dir": os.path.abspath(p)})
     self._on_load_project()
 
   def _on_load_project(self) -> None:
     p = (self.project_dir_var.get() or "").strip()
     if not p or not os.path.isdir(p):
+      Log.error(self.LOG_TAG, "Load project blocked: missing or invalid directory.", {"project_dir": p})
       messagebox.showerror("Project", "Project directory is missing or invalid.")
       return
     self._load_project_dir(p)
 
   def _on_clear_history(self) -> None:
-    if not messagebox.askyesno("Clear History", "Clear recent project directory history?"):
+    should_clear = messagebox.askyesno("Clear History", "Clear recent project directory history?")
+    if not should_clear:
+      Log.warn(self.LOG_TAG, "Clear history canceled by user.")
       return
+    Log.warn(self.LOG_TAG, "Clearing active project state and recent history.")
     self._clear_project_history()
     self.project_dir_var.set("")
     self.project_dir = ""
@@ -3764,11 +4048,13 @@ class InventoryApp(ctk.CTk):
 
   def _on_alias_add(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Add alias blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     try:
       sku, name, custom_fields = self._read_alias_form()
     except Exception as e:
+      Log.error(self.LOG_TAG, "Add alias validation failed.", {"error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
 
@@ -3785,11 +4071,13 @@ class InventoryApp(ctk.CTk):
 
   def _on_alias_delete_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Delete aliases blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
     skus = self._get_selected_alias_skus()
     if not skus:
+      Log.warn(self.LOG_TAG, "Delete aliases requested with no selection.")
       messagebox.showinfo("Delete", "Select one or more alias rows first.")
       return
 
@@ -3798,6 +4086,7 @@ class InventoryApp(ctk.CTk):
       preview += f", … (+{len(skus) - 10} more)"
 
     if not messagebox.askyesno("Delete Alias", f"Delete {len(skus)} selected alias(es)?\n\nSKUs: {preview}"):
+      Log.warn(self.LOG_TAG, "Delete aliases canceled by user.", {"count": len(skus)})
       return
 
     sku_set = set(skus)
@@ -3841,12 +4130,14 @@ class InventoryApp(ctk.CTk):
 
   def _on_add(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Add transaction blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
     try:
       tx = self._read_form_to_transaction(existing_id=None)
     except Exception as e:
+      Log.error(self.LOG_TAG, "Add transaction validation failed.", {"error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
 
@@ -3857,15 +4148,18 @@ class InventoryApp(ctk.CTk):
 
   def _on_update_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Update transaction blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
     ids = self._get_selected_tx_ids()
     if not ids:
+      Log.warn(self.LOG_TAG, "Update transaction requested with no selection.")
       messagebox.showinfo("Update", "Select a transaction row first.")
       return
 
     if len(ids) != 1:
+      Log.warn(self.LOG_TAG, "Update transaction requires single selection.", {"selected_count": len(ids)})
       messagebox.showwarning("Update", "Please select exactly ONE transaction row to update.")
       return
 
@@ -3874,6 +4168,7 @@ class InventoryApp(ctk.CTk):
     try:
       updated = self._read_form_to_transaction(existing_id=sel)
     except Exception as e:
+      Log.error(self.LOG_TAG, "Update transaction validation failed.", {"id": sel, "error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
 
@@ -3890,15 +4185,18 @@ class InventoryApp(ctk.CTk):
 
   def _on_alias_update_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Update alias blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
     skus = self._get_selected_alias_skus()
     if not skus:
+      Log.warn(self.LOG_TAG, "Update alias requested with no selection.")
       messagebox.showinfo("Update", "Select an alias row first.")
       return
 
     if len(skus) != 1:
+      Log.warn(self.LOG_TAG, "Update alias requires single selection.", {"selected_count": len(skus)})
       messagebox.showwarning("Update", "Please select exactly ONE alias row to update.")
       return
 
@@ -3908,6 +4206,7 @@ class InventoryApp(ctk.CTk):
     try:
       sku, name, custom_fields = self._read_alias_form()
     except Exception as e:
+      Log.error(self.LOG_TAG, "Update alias validation failed.", {"sku": sel_sku, "error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
 
@@ -4672,15 +4971,22 @@ class InventoryApp(ctk.CTk):
 
   def _on_custom_schema_add(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Add custom field blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     try:
       entry = self._read_custom_schema_form()
       self._upsert_custom_schema_entry(entry)
     except Exception as e:
+      Log.error(self.LOG_TAG, "Add custom field validation failed.", {"error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
     self._save_and_refresh(schema_changed=True)
+    Log.ok(self.LOG_TAG, "Added/updated custom field.", {
+      "key": str(entry.get("key") or ""),
+      "target": self._normalize_custom_target(entry.get("target")),
+      "type": self._normalize_custom_type(entry.get("type")),
+    })
     try:
       self.custom_schema_tree.selection_set(entry["key"])
       self.custom_schema_tree.focus(entry["key"])
@@ -4690,13 +4996,16 @@ class InventoryApp(ctk.CTk):
 
   def _on_custom_schema_update_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Update custom field blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     keys = self._get_selected_custom_schema_keys()
     if not keys:
+      Log.warn(self.LOG_TAG, "Update custom field requested with no selection.")
       messagebox.showinfo("Update", "Select a custom field row first.")
       return
     if len(keys) != 1:
+      Log.warn(self.LOG_TAG, "Update custom field requires single selection.", {"selected_count": len(keys)})
       messagebox.showwarning("Update", "Please select exactly ONE custom field row to update.")
       return
     old_key = keys[0]
@@ -4726,9 +5035,11 @@ class InventoryApp(ctk.CTk):
               values.pop(entry["key"], None)
               alias["custom_fields"] = values
     except Exception as e:
+      Log.error(self.LOG_TAG, "Update custom field validation failed.", {"key": old_key, "error": str(e)})
       messagebox.showerror("Invalid", str(e))
       return
     self._save_and_refresh(schema_changed=True)
+    Log.ok(self.LOG_TAG, "Updated custom field.", {"from": old_key, "to": str(entry.get("key") or old_key)})
     try:
       self.custom_schema_tree.selection_set(entry["key"])
       self.custom_schema_tree.focus(entry["key"])
@@ -4738,16 +5049,19 @@ class InventoryApp(ctk.CTk):
 
   def _on_custom_schema_delete_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Delete custom fields blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
     keys = self._get_selected_custom_schema_keys()
     if not keys:
+      Log.warn(self.LOG_TAG, "Delete custom fields requested with no selection.")
       messagebox.showinfo("Delete", "Select one or more custom field rows first.")
       return
     preview = ", ".join(keys[:8])
     if len(keys) > 8:
       preview += f", ... (+{len(keys) - 8} more)"
     if not messagebox.askyesno("Delete Custom Field", f"Delete {len(keys)} selected custom field(s)?\n\nFields: {preview}"):
+      Log.warn(self.LOG_TAG, "Delete custom fields canceled by user.", {"count": len(keys)})
       return
     entries = [dict(self._custom_field_schema_map.get(k) or {}) for k in keys]
     self.custom_fields_schema = [x for x in (self.custom_fields_schema or []) if str(x.get("key") or "").strip() not in set(keys)]
@@ -4765,14 +5079,17 @@ class InventoryApp(ctk.CTk):
       getattr(self, "_sync_custom_schema_enum_state", lambda: None)()
     except Exception:
       pass
+    Log.warn(self.LOG_TAG, "Deleted custom fields.", {"count": len(keys), "keys": keys})
 
   def _on_delete_selected(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Delete transactions blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
     ids = self._get_selected_tx_ids()
     if not ids:
+      Log.warn(self.LOG_TAG, "Delete transactions requested with no selection.")
       messagebox.showinfo("Delete", "Select one or more transaction rows first.")
       return
 
@@ -4781,6 +5098,7 @@ class InventoryApp(ctk.CTk):
       preview += f", … (+{len(ids) - 10} more)"
 
     if not messagebox.askyesno("Delete", f"Delete {len(ids)} selected transaction(s)?\n\nIDs: {preview}"):
+      Log.warn(self.LOG_TAG, "Delete transactions canceled by user.", {"count": len(ids)})
       return
 
     id_set = set(ids)
@@ -4886,9 +5204,14 @@ class InventoryApp(ctk.CTk):
     self.transactions.sort(key=lambda t: (t.date, t.created_order, t.id))
 
   def _refresh_all(self) -> None:
+    Log.info(self.LOG_TAG, "Refreshing computed views.", {"tx_count": len(self.transactions)})
     rows, overview = self.engine.compute(self.transactions)
     self._refresh_tx_table(rows)
     self._refresh_overview_table(overview, rows)
+    Log.info(self.LOG_TAG, "Refreshed computed views.", {
+      "row_count": len(rows),
+      "overview_sku_count": len(overview),
+    })
 
   def _refresh_tx_table(self, rows: List[Dict[str, Any]]) -> None:
     # If a hover-tooltip is currently visible, kill it before rebuilding rows.
@@ -5289,6 +5612,7 @@ class InventoryApp(ctk.CTk):
 
   def _export_overview_csv(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Overview CSV export blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
@@ -5303,6 +5627,7 @@ class InventoryApp(ctk.CTk):
       initialdir=self.project_dir or None,
     )
     if not path:
+      Log.warn(self.LOG_TAG, "Overview CSV export canceled.")
       return
 
     rows, overview = self.engine.compute(self.transactions)
@@ -5430,6 +5755,7 @@ class InventoryApp(ctk.CTk):
 
   def _export_csv(self) -> None:
     if not self.project_data_path:
+      Log.error(self.LOG_TAG, "Transactions CSV export blocked: no project selected.")
       messagebox.showerror("Project", "Select a Project Directory first.")
       return
 
@@ -5441,6 +5767,7 @@ class InventoryApp(ctk.CTk):
       initialdir=self.project_dir or None,
     )
     if not path:
+      Log.warn(self.LOG_TAG, "Transactions CSV export canceled.")
       return
 
     rows, _ = self.engine.compute(self.transactions)
