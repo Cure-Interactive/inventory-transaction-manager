@@ -1,0 +1,9 @@
+{
+  "name": "inventory-transaction-manager",
+  "private": true,
+  "scripts": {
+    "inventory-manager:web:build": "npm --prefix .\\tools\\synticore-website-compiler run gulp -- build --project \".\\web\"",
+    "inventory-manager:web:rebuild": "npm --prefix .\\tools\\synticore-website-compiler run gulp -- rebuild --project \".\\web\"",
+    "inventory-manager:web:browser": "npm --prefix .\\tools\\synticore-website-compiler run gulp -- browser --project \".\\web\""
+  }
+}

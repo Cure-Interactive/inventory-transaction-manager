@@ -1,0 +1,15 @@
+{
+  "require": {
+    "site": {
+      "title": "Inventory Transaction Manager Web",
+      "url": "https://example.invalid/inventory-transaction-manager"
+    }
+  },
+  "custom": {
+    "brand": {
+      "slogan": "Browser-side parity track for transactions, aliases, overview, and field control.",
+      "color": "#1c6b57",
+      "copyright_years": 2026
+    }
+  }
+}

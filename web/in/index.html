@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Inventory Transaction Manager Web</title>
+    <link rel="stylesheet" href="asset/css/style.min.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar panel">
+        <div>
+          <p class="eyebrow">Inventory Transaction Manager</p>
+          <h1>Browser Parity Track</h1>
+          <p class="topbar__slogan" data-brand-slogan></p>
+        </div>
+        <div class="topbar__actions">
+          <button class="button" type="button" data-action="seed-demo">Load Demo</button>
+          <button class="button" type="button" data-action="import-json">Import JSON</button>
+          <button class="button button--primary" type="button" data-action="export-json">Export JSON</button>
+          <input class="visually-hidden" type="file" accept="application/json" data-import-input>
+        </div>
+      </header>
+
+      <section class="panel panel--tabs">
+        <nav class="tabs" aria-label="Inventory Manager Tabs">
+          <button class="tab is-active" type="button" data-tab="transactions">Transactions</button>
+          <button class="tab" type="button" data-tab="overview">Overview</button>
+          <button class="tab" type="button" data-tab="aliases">Aliases</button>
+          <button class="tab" type="button" data-tab="fields">Custom Fields</button>
+        </nav>
+      </section>
+
+      <main class="workspace">
+        <section class="tab-panel is-active" data-panel="transactions">
+          <div class="grid grid--main">
+            <section class="panel panel--section">
+              <div class="section-heading">
+                <h2 class="section-title">New Transaction</h2>
+                <p class="section-copy">Uses the same transaction JSON shape and weighted-average inventory logic as the Python app.</p>
+              </div>
+              <form class="form-grid" data-form="transaction">
+                <label class="field">
+                  <span class="field__label">Date</span>
+                  <input name="date" type="date" required>
+                </label>
+                <label class="field">
+                  <span class="field__label">SKU</span>
+                  <input name="sku" type="text" required placeholder="SKU-1001">
+                </label>
+                <label class="field">
+                  <span class="field__label">Type</span>
+                  <select name="type" required>
+                    <option value="PURCHASE">Purchase</option>
+                    <option value="SALE">Sale</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field__label">Quantity</span>
+                  <input name="qty" type="number" min="0.0001" step="0.0001" required>
+                </label>
+                <label class="field">
+                  <span class="field__label">Purchase Unit Cost</span>
+                  <input name="purchase_unit_cost" type="number" min="0" step="0.0001" placeholder="0.00">
+                </label>
+                <label class="field">
+                  <span class="field__label">Sale Unit Price</span>
+                  <input name="sale_unit_price" type="number" min="0" step="0.0001" placeholder="0.00">
+                </label>
+                <label class="field field--full">
+                  <span class="field__label">Note</span>
+                  <input name="note" type="text" placeholder="Optional note">
+                </label>
+                <div class="field field--full" data-transaction-custom-fields></div>
+                <div class="toolbar toolbar--end field--full">
+                  <button class="button button--primary" type="submit">Add Transaction</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="panel panel--section">
+              <div class="section-heading section-heading--row">
+                <div>
+                  <h2 class="section-title">Transactions</h2>
+                  <p class="section-copy" data-transaction-summary></p>
+                </div>
+                <div class="toolbar">
+                  <button class="button" type="button" data-action="export-transactions-csv">Export CSV</button>
+                  <button class="button" type="button" data-action="clear-transactions">Clear</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table" data-table="transactions"></table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="overview">
+          <div class="grid grid--main">
+            <section class="panel panel--section">
+              <div class="section-heading section-heading--row">
+                <div>
+                  <h2 class="section-title">Overview</h2>
+                  <p class="section-copy">Inventory and monthly summaries are recomputed from transaction history.</p>
+                </div>
+                <div class="toolbar">
+                  <select class="select-inline" data-overview-mode>
+                    <option value="inventory">Inventory</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                  <button class="button" type="button" data-action="export-overview-csv">Export CSV</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table" data-table="overview"></table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="aliases">
+          <div class="grid grid--sidebar">
+            <section class="panel panel--section">
+              <div class="section-heading">
+                <h2 class="section-title">Alias</h2>
+                <p class="section-copy">Map SKUs to display names and alias labels used in the inventory views.</p>
+              </div>
+              <form class="form-grid" data-form="alias">
+                <label class="field">
+                  <span class="field__label">SKU</span>
+                  <input name="sku" type="text" required placeholder="SKU-1001">
+                </label>
+                <label class="field">
+                  <span class="field__label">Name</span>
+                  <input name="name" type="text" required placeholder="Widget Prime">
+                </label>
+                <label class="field field--full">
+                  <span class="field__label">Alias</span>
+                  <input name="alias" type="text" placeholder="Front shelf widget">
+                </label>
+                <div class="toolbar toolbar--end field--full">
+                  <button class="button button--primary" type="submit">Save Alias</button>
+                </div>
+              </form>
+            </section>
+            <section class="panel panel--section">
+              <div class="section-heading">
+                <h2 class="section-title">Alias List</h2>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table" data-table="aliases"></table>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="fields">
+          <div class="grid grid--sidebar">
+            <section class="panel panel--section">
+              <div class="section-heading">
+                <h2 class="section-title">Custom Field</h2>
+                <p class="section-copy">Create schema-backed fields and control which built-ins stay visible.</p>
+              </div>
+              <form class="form-grid" data-form="field">
+                <label class="field">
+                  <span class="field__label">Key</span>
+                  <input name="key" type="text" required placeholder="warehouse_bin">
+                </label>
+                <label class="field">
+                  <span class="field__label">Label</span>
+                  <input name="label" type="text" required placeholder="Warehouse Bin">
+                </label>
+                <label class="field">
+                  <span class="field__label">Type</span>
+                  <select name="type" required>
+                    <option value="text">Text</option>
+                    <option value="number">Number</option>
+                    <option value="enum">Enum</option>
+                  </select>
+                </label>
+                <label class="field field--full">
+                  <span class="field__label">Enum Options</span>
+                  <input name="options" type="text" placeholder="Aisle A, Aisle B, Overflow">
+                </label>
+                <div class="toolbar toolbar--end field--full">
+                  <button class="button button--primary" type="submit">Add Field</button>
+                </div>
+              </form>
+            </section>
+            <section class="panel panel--section">
+              <div class="section-heading">
+                <h2 class="section-title">Field Registry</h2>
+                <p class="section-copy">Built-ins are marked by capability so removable columns can be hidden without changing engine-critical fields.</p>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table" data-table="fields"></table>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer panel">
+        <p>Stored locally in the browser for now. Use JSON import/export for parity work until project-folder IO is added.</p>
+      </footer>
+    </div>
+
+    <script src="asset/js/main.min.js"></script>
+  </body>
+  </html>

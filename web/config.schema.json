@@ -1,0 +1,27 @@
+{
+  "keys": [
+    {
+      "description": "Container object for project-specific brand configuration.",
+      "key": "custom.brand",
+      "structure": {
+        "kind": "object"
+      },
+      "type": "object"
+    },
+    {
+      "description": "Primary brand color used for the inventory manager web app.",
+      "key": "custom.brand.color",
+      "type": "color"
+    },
+    {
+      "description": "Copyright year or year range displayed in the footer.",
+      "key": "custom.brand.copyright_years",
+      "type": "number"
+    },
+    {
+      "description": "Short brand slogan shown in the app header.",
+      "key": "custom.brand.slogan",
+      "type": "string"
+    }
+  ]
+}
