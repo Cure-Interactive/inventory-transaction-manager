@@ -1,21 +1,22 @@
 # Inventory Transaction Manager Web
 
-This folder contains the Synticore project for the browser-based parity track of the Python Inventory Transaction Manager.
+Synticore browser project for the web parity track of Inventory Transaction Manager.
 
 ## Layout
 
-- `inventory_transaction_manager/` is the npm root for this web surface.
-- `inventory_transaction_manager/web/` contains the nested Synticore project so its build files do not mix with the Python app files.
-- `inventory_transaction_manager/web/in/` is the editable project source.
-- `inventory_transaction_manager/web/out/` is generated output.
+- `in/`: editable source
+- `out/`: generated output, ignored by Git
+- `config.json`: web project config
+- `config.schema.json`: project-specific config schema
+- `info.json`: project version metadata
 
-## Commands
+## Build
 
-Run from `inventory_transaction_manager/`:
+Use the wrapper scripts from the repository root:
 
 ```bash
 npm run inventory-manager:web:build
 npm run inventory-manager:web:browser
 ```
 
-The commands call the sibling `synticore-website-compiler` repository against this nested project path.
+Those scripts expect the Synticore compiler to be available at `tools/synticore-website-compiler` in the repository root.
