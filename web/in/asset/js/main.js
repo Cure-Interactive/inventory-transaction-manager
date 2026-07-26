@@ -445,14 +445,14 @@
         status: "INACTIVE"
       };
 
-      if (transaction.type === "PURCHASE") {
+      if (["PURCHASE", "CAPITAL CONTRIBUTION"].includes(transaction.type)) {
         const purchaseCost = toNumber(transaction.purchase_unit_cost);
         const nextQty = current.onhand_qty + transaction.qty;
         const totalCost = current.onhand_cost + transaction.qty * purchaseCost;
         current.onhand_qty = nextQty;
         current.onhand_cost = totalCost;
         current.avg_cost_after = nextQty ? totalCost / nextQty : 0;
-      } else if (transaction.type === "SALE") {
+      } else if (["SALE", "CAPITAL DISTRIBUTION"].includes(transaction.type)) {
         current.onhand_qty = current.onhand_qty - transaction.qty;
         current.onhand_cost = current.onhand_qty * current.avg_cost_after;
         current.last_sale_price = formatNumber(transaction.sale_unit_price);
@@ -491,14 +491,20 @@
         purchase_qty: 0,
         sale_qty: 0,
         purchase_total_cost: 0,
-        sales_rev: 0
+        sales_rev: 0,
+        contribution_amount: 0,
+        distribution_amount: 0
       };
       if (transaction.type === "PURCHASE") {
         current.purchase_qty += transaction.qty;
         current.purchase_total_cost += transaction.qty * toNumber(transaction.purchase_unit_cost);
-      } else {
+      } else if (transaction.type === "SALE") {
         current.sale_qty += transaction.qty;
         current.sales_rev += transaction.qty * toNumber(transaction.sale_unit_price);
+      } else if (transaction.type === "CAPITAL CONTRIBUTION") {
+        current.contribution_amount += transaction.qty * toNumber(transaction.purchase_unit_cost);
+      } else if (transaction.type === "CAPITAL DISTRIBUTION") {
+        current.distribution_amount += transaction.qty * toNumber(transaction.sale_unit_price);
       }
       monthly.set(month, current);
     });
@@ -509,7 +515,9 @@
         purchase_qty: formatNumber(row.purchase_qty),
         sale_qty: formatNumber(row.sale_qty),
         purchase_total_cost: formatNumber(row.purchase_total_cost),
-        sales_rev: formatNumber(row.sales_rev)
+        sales_rev: formatNumber(row.sales_rev),
+        contribution_amount: formatNumber(row.contribution_amount),
+        distribution_amount: formatNumber(row.distribution_amount)
       }));
   }
 
